@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from supabase import create_client, Client
@@ -41,6 +42,7 @@ body {{ font-family: Arial, sans-serif; margin: 0; background: #f4f4f7; color: #
 .container {{ max-width: 1000px; margin: 20px auto; padding: 0 15px; }}
 .card {{ background: white; border-radius: 8px; padding: 20px; margin-bottom: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }}
 h2 {{ color: #1e40af; margin-top: 0; }}
+h3 {{ color: #1e40af; margin-top: 15px; }}
 table {{ width: 100%; border-collapse: collapse; }}
 th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #eee; }}
 th {{ background: #f9fafb; }}
@@ -140,6 +142,7 @@ def home(request: Request):
         <a href="/add" class="btn">Add Material</a>
         <a href="/products" class="btn">View All</a>
         <a href="/sell" class="btn btn-success">New Sale</a>
+        <a href="/reports" class="btn">📊 Reports</a>
     </div>
     """
     return page("Dashboard", body, user)
@@ -253,7 +256,7 @@ def edit_form(request: Request, product_id: int):
             <label>Location</label><input type="text" name="location" value="{p.get('location','') or ''}">
             <label>Cost Price</label><input type="number" step="0.01" name="cost_price" value="{p['cost_price']}" required>
             <label>Selling Price</label><input type="number" step="0.01" name="selling_price" value="{p['selling_price']}" required>
-            <label>Current Stock (edit to correct)</label><input type="number" step="0.01" name="quantity_in_stock" value="{p['quantity_in_stock']}" required>
+            <label>Current Stock</label><input type="number" step="0.01" name="quantity_in_stock" value="{p['quantity_in_stock']}" required>
             <label>Reorder Level</label><input type="number" step="0.01" name="reorder_level" value="{p['reorder_level']}">
             <button type="submit">Save Changes</button>
             <a href="/products" class="btn">Cancel</a>
@@ -269,14 +272,12 @@ async def edit_product(request: Request, product_id: int, name: str = Form(...),
     if not user:
         return RedirectResponse("/login", status_code=303)
 
-    # get old stock to detect change
     old = supabase.table("products").select("*").eq("id", product_id).single().execute().data
     old_qty = float(old.get("quantity_in_stock", 0))
 
     data = {"name": name, "sku": sku, "category_id": int(category_id), "unit": unit, "location": location or None, "cost_price": cost_price, "selling_price": selling_price, "quantity_in_stock": quantity_in_stock, "reorder_level": reorder_level}
     supabase.table("products").update(data).eq("id", product_id).execute()
 
-    # log a stock adjustment if quantity changed
     if abs(quantity_in_stock - old_qty) > 0.001:
         supabase.table("stock_movements").insert({
             "product_id": product_id,
@@ -335,7 +336,7 @@ def sell_form(request: Request, product_id: int):
         <p>Price: <strong>GHS {float(p['selling_price']):,.2f}</strong></p>
         <form method="post" action="/sell/{product_id}">
             <label>Quantity</label><input type="number" step="0.01" name="quantity" required min="0.01" max="{p['quantity_in_stock']}">
-            <button type="submit" class="btn-success">Sell</button>
+            <button type="submit" class="btn-success">Complete Sale</button>
             <a href="/sell" class="btn">Cancel</a>
         </form>
     </div>
@@ -352,22 +353,64 @@ async def do_sell(request: Request, product_id: int, quantity: float = Form(...)
     p = supabase.table("products").select("*").eq("id", product_id).single().execute().data
     if float(p["quantity_in_stock"]) < quantity:
         raise HTTPException(400, "Not enough stock")
+
+    unit_price = float(p["selling_price"])
+    cost_price = float(p["cost_price"])
+    line_total = quantity * unit_price
+
+    # Create the sale
+    invoice_no = f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    sale_data = {
+        "invoice_no": invoice_no,
+        "subtotal": line_total,
+        "total": line_total,
+        "payment_method": "cash",
+        "amount_paid": line_total,
+        "status": "completed",
+        "user_id": user
+    }
+    sale_result = supabase.table("sales").insert(sale_data).execute()
+    sale_id = sale_result.data[0]["id"]
+
+    # Create the sale item
+    supabase.table("sale_items").insert({
+        "sale_id": sale_id,
+        "product_id": product_id,
+        "product_name": p["name"],
+        "quantity": quantity,
+        "unit_price": unit_price,
+        "cost_price": cost_price,
+        "line_total": line_total
+    }).execute()
+
+    # Reduce stock
     new_qty = float(p["quantity_in_stock"]) - quantity
     supabase.table("products").update({"quantity_in_stock": new_qty}).eq("id", product_id).execute()
-    supabase.table("stock_movements").insert({"product_id": product_id, "movement_type": "OUT", "quantity": quantity, "note": f"Sale by {user}"}).execute()
+
+    # Log movement
+    supabase.table("stock_movements").insert({
+        "product_id": product_id,
+        "movement_type": "OUT",
+        "quantity": quantity,
+        "note": f"{invoice_no} — {p['name']} x {quantity} — {user}"
+    }).execute()
+
     body = f"""
     <div class="card">
-        <h2>Sale Complete</h2>
-        <p>{quantity} {p['unit']} of {p['name']} sold for GHS {quantity * float(p['selling_price']):,.2f}</p>
-        <p>Remaining: {new_qty} {p['unit']}</p>
-        <a href="/sell" class="btn">Sell Another</a>
-        <a href="/products" class="btn">Back</a>
+        <h2>✅ Sale Complete</h2>
+        <p><strong>Invoice:</strong> {invoice_no}</p>
+        <p><strong>Item:</strong> {quantity} {p['unit']} of {p['name']}</p>
+        <p><strong>Total:</strong> GHS {line_total:,.2f}</p>
+        <p>Remaining stock: {new_qty} {p['unit']}</p>
+        <a href="/sell" class="btn btn-success">Sell Another</a>
+        <a href="/reports" class="btn">View Reports</a>
+        <a href="/" class="btn">Dashboard</a>
     </div>
     """
-    return page("Done", body, user)
+    return page("Sale Complete", body, user)
 
 
-# ============ CATEGORIES & REPORTS ============
+# ============ CATEGORIES ============
 
 @app.get("/categories", response_class=HTMLResponse)
 def categories_list(request: Request):
@@ -381,23 +424,95 @@ def categories_list(request: Request):
     return page("Categories", body, user)
 
 
+# ============ REPORTS ============
+
 @app.get("/reports", response_class=HTMLResponse)
 def reports(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
 
-    movements = supabase.table("stock_movements").select("*").eq("movement_type", "OUT").order("created_at", desc=True).limit(50).execute().data
-    rows = ""
-    for m in movements:
-        rows += f"<tr><td>{m.get('created_at','')[:16]}</td><td>{m.get('note','')}</td><td>{m.get('quantity')}</td></tr>"
+    # fetch all sales
+    sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
+
+    # compute totals by period
+    now = datetime.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    month_start = now - timedelta(days=30)
+
+    def parse_date(s):
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            return None
+
+    today_total = 0.0
+    week_total = 0.0
+    month_total = 0.0
+    total_all = 0.0
+
+    for s in sales:
+        amount = float(s.get("total", 0))
+        total_all += amount
+        d = parse_date(s.get("created_at", ""))
+        if d:
+            if d >= today_start:
+                today_total += amount
+            if d >= week_start:
+                week_total += amount
+            if d >= month_start:
+                month_total += amount
+
+    # top selling products
+    items = supabase.table("sale_items").select("*").execute().data
+    product_stats = {}
+    for it in items:
+        name = it.get("product_name", "Unknown")
+        qty = float(it.get("quantity", 0))
+        revenue = float(it.get("line_total", 0))
+        cost = float(it.get("cost_price", 0)) * qty
+        profit = revenue - cost
+        if name not in product_stats:
+            product_stats[name] = {"qty": 0, "revenue": 0, "profit": 0}
+        product_stats[name]["qty"] += qty
+        product_stats[name]["revenue"] += revenue
+        product_stats[name]["profit"] += profit
+
+    top = sorted(product_stats.items(), key=lambda x: x[1]["qty"], reverse=True)[:10]
+    top_rows = "".join(
+        f"<tr><td>{name}</td><td>{data['qty']:.0f}</td><td>GHS {data['revenue']:,.2f}</td><td>GHS {data['profit']:,.2f}</td></tr>"
+        for name, data in top
+    )
+
+    # recent sales
+    recent_rows = ""
+    for s in sales[:20]:
+        recent_rows += f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>{s.get('user_id','')}</td></tr>"
+
     body = f"""
     <h2>Reports</h2>
+
+    <div class="grid">
+        <div class="card stat"><div class="num">GHS {today_total:,.2f}</div><div class="label">Today</div></div>
+        <div class="card stat"><div class="num">GHS {week_total:,.2f}</div><div class="label">Last 7 days</div></div>
+        <div class="card stat"><div class="num">GHS {month_total:,.2f}</div><div class="label">Last 30 days</div></div>
+        <div class="card stat"><div class="num">GHS {total_all:,.2f}</div><div class="label">All time</div></div>
+    </div>
+
     <div class="card">
-        <h3>Recent Sales (last 50)</h3>
+        <h3>🏆 Top Selling Materials</h3>
         <table>
-            <tr><th>Time</th><th>Note</th><th>Qty</th></tr>
-            {rows if rows else "<tr><td colspan='3'>No sales yet.</td></tr>"}
+            <tr><th>Material</th><th>Qty Sold</th><th>Revenue</th><th>Profit</th></tr>
+            {top_rows if top_rows else "<tr><td colspan='4'>No sales yet.</td></tr>"}
+        </table>
+    </div>
+
+    <div class="card">
+        <h3>🧾 Recent Sales (last 20)</h3>
+        <table>
+            <tr><th>Date</th><th>Invoice</th><th>Total</th><th>User</th></tr>
+            {recent_rows if recent_rows else "<tr><td colspan='4'>No sales yet.</td></tr>"}
         </table>
     </div>
     """
