@@ -1,9 +1,9 @@
 import os
-from fastapi import FastAPI, Form, HTTPException, Request, Depends
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from supabase import create_client, Client
 from dotenv import load_dotenv
-from auth import create_session, get_current_user, require_login, COOKIE_NAME
+from auth import create_session, get_current_user, COOKIE_NAME
 
 load_dotenv()
 
@@ -17,8 +17,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = FastAPI(title="Building Materials Shop")
 
-
-# ---- Simple user store (in-memory; change password after login works) ----
 USERS = {
     "admin": "admin123",
 }
@@ -47,10 +45,12 @@ table {{ width: 100%; border-collapse: collapse; }}
 th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #eee; }}
 th {{ background: #f9fafb; }}
 input, select {{ width: 100%; padding: 10px; margin: 5px 0 15px; border: 1px solid #ddd; border-radius: 5px; font-size: 15px; }}
-button, .btn {{ background: #1e40af; color: white; padding: 12px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 15px; text-decoration: none; display: inline-block; }}
+button, .btn {{ background: #1e40af; color: white; padding: 10px 16px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; }}
 button:hover, .btn:hover {{ background: #1e3a8a; }}
 .btn-success {{ background: #16a34a; }}
 .btn-danger {{ background: #dc2626; }}
+.btn-warn {{ background: #d97706; }}
+.btn-small {{ padding: 6px 12px; font-size: 13px; }}
 .low {{ color: #dc2626; font-weight: bold; }}
 .ok {{ color: #16a34a; font-weight: bold; }}
 .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
@@ -113,7 +113,7 @@ def logout():
     return response
 
 
-# ============ PROTECTED PAGES ============
+# ============ DASHBOARD ============
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
@@ -138,12 +138,14 @@ def home(request: Request):
     </div>
     <div class="card">
         <a href="/add" class="btn">Add Material</a>
-        <a href="/products" class="btn" style="margin-left:10px;">View All</a>
-        <a href="/sell" class="btn btn-success" style="margin-left:10px;">New Sale</a>
+        <a href="/products" class="btn">View All</a>
+        <a href="/sell" class="btn btn-success">New Sale</a>
     </div>
     """
     return page("Dashboard", body, user)
 
+
+# ============ PRODUCTS ============
 
 @app.get("/products", response_class=HTMLResponse)
 def products_list(request: Request, search: str = ""):
@@ -160,15 +162,27 @@ def products_list(request: Request, search: str = ""):
         qty = float(p.get("quantity_in_stock", 0))
         reorder = float(p.get("reorder_level", 0))
         status = "low" if qty <= reorder else "ok"
-        rows += f"<tr><td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td><td>{p.get('unit','')}</td><td class='{status}'>{qty}</td><td>GHS {float(p['selling_price']):,.2f}</td></tr>"
+        rows += f"""<tr>
+            <td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td>
+            <td>{p.get('unit','')}</td>
+            <td class='{status}'>{qty}</td>
+            <td>GHS {float(p['selling_price']):,.2f}</td>
+            <td>
+                <a href='/edit/{p['id']}' class='btn btn-warn btn-small'>✏️ Edit</a>
+                <a href='/delete/{p['id']}' class='btn btn-danger btn-small' onclick="return confirm('Delete {p['name']}?')">🗑️</a>
+            </td>
+        </tr>"""
     body = f"""
     <h2>All Materials</h2>
     <div class="card">
-        <form method="get"><input type="text" name="search" placeholder="Search..." value="{search}"><button>Search</button></form>
+        <form method="get" style="display:flex;gap:10px;">
+            <input type="text" name="search" placeholder="Search..." value="{search}">
+            <button>Search</button>
+        </form>
     </div>
     <div class="card"><table>
-        <tr><th>Material</th><th>Unit</th><th>Stock</th><th>Price</th></tr>
-        {rows if rows else "<tr><td colspan='4'>No materials. <a href='/add'>Add one</a>.</td></tr>"}
+        <tr><th>Material</th><th>Unit</th><th>Stock</th><th>Price</th><th>Actions</th></tr>
+        {rows if rows else "<tr><td colspan='5'>No materials. <a href='/add'>Add one</a>.</td></tr>"}
     </table></div>
     """
     return page("Materials", body, user)
@@ -216,6 +230,76 @@ async def add_product(request: Request, name: str = Form(...), sku: str = Form(.
     return RedirectResponse("/products", status_code=303)
 
 
+@app.get("/edit/{product_id}", response_class=HTMLResponse)
+def edit_form(request: Request, product_id: int):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    p = supabase.table("products").select("*").eq("id", product_id).single().execute().data
+    cats = supabase.table("categories").select("*").order("name").execute().data
+    cat_options = "".join(
+        f"<option value='{c['id']}' {'selected' if c['id']==p.get('category_id') else ''}>{c['name']}</option>"
+        for c in cats
+    )
+    body = f"""
+    <h2>Edit Material</h2>
+    <div class="card">
+        <form method="post" action="/edit/{product_id}">
+            <label>Name</label><input type="text" name="name" value="{p['name']}" required>
+            <label>SKU</label><input type="text" name="sku" value="{p.get('sku','')}" required>
+            <label>Category</label><select name="category_id" required>{cat_options}</select>
+            <label>Unit</label><input type="text" name="unit" value="{p.get('unit','')}" required>
+            <label>Location</label><input type="text" name="location" value="{p.get('location','') or ''}">
+            <label>Cost Price</label><input type="number" step="0.01" name="cost_price" value="{p['cost_price']}" required>
+            <label>Selling Price</label><input type="number" step="0.01" name="selling_price" value="{p['selling_price']}" required>
+            <label>Current Stock (edit to correct)</label><input type="number" step="0.01" name="quantity_in_stock" value="{p['quantity_in_stock']}" required>
+            <label>Reorder Level</label><input type="number" step="0.01" name="reorder_level" value="{p['reorder_level']}">
+            <button type="submit">Save Changes</button>
+            <a href="/products" class="btn">Cancel</a>
+        </form>
+    </div>
+    """
+    return page("Edit", body, user)
+
+
+@app.post("/edit/{product_id}")
+async def edit_product(request: Request, product_id: int, name: str = Form(...), sku: str = Form(...), category_id: str = Form(...), unit: str = Form(...), location: str = Form(""), cost_price: float = Form(...), selling_price: float = Form(...), quantity_in_stock: float = Form(...), reorder_level: float = Form(10)):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    # get old stock to detect change
+    old = supabase.table("products").select("*").eq("id", product_id).single().execute().data
+    old_qty = float(old.get("quantity_in_stock", 0))
+
+    data = {"name": name, "sku": sku, "category_id": int(category_id), "unit": unit, "location": location or None, "cost_price": cost_price, "selling_price": selling_price, "quantity_in_stock": quantity_in_stock, "reorder_level": reorder_level}
+    supabase.table("products").update(data).eq("id", product_id).execute()
+
+    # log a stock adjustment if quantity changed
+    if abs(quantity_in_stock - old_qty) > 0.001:
+        supabase.table("stock_movements").insert({
+            "product_id": product_id,
+            "movement_type": "ADJUSTMENT",
+            "quantity": quantity_in_stock - old_qty,
+            "note": f"Manual edit by {user}"
+        }).execute()
+
+    return RedirectResponse("/products", status_code=303)
+
+
+@app.get("/delete/{product_id}")
+def delete_product(request: Request, product_id: int):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    supabase.table("products").update({"is_active": False}).eq("id", product_id).execute()
+    return RedirectResponse("/products", status_code=303)
+
+
+# ============ SALES ============
+
 @app.get("/sell", response_class=HTMLResponse)
 def sell_page(request: Request):
     user = get_current_user(request)
@@ -226,7 +310,7 @@ def sell_page(request: Request):
     rows = ""
     for p in products:
         qty = float(p.get("quantity_in_stock", 0))
-        rows += f"<tr><td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td><td>{qty} {p.get('unit','')}</td><td>GHS {float(p['selling_price']):,.2f}</td><td><a href='/sell/{p['id']}' class='btn btn-success'>Sell</a></td></tr>"
+        rows += f"<tr><td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td><td>{qty} {p.get('unit','')}</td><td>GHS {float(p['selling_price']):,.2f}</td><td><a href='/sell/{p['id']}' class='btn btn-success btn-small'>Sell</a></td></tr>"
     body = f"""
     <h2>New Sale — Pick a Material</h2>
     <div class="card"><table>
@@ -282,6 +366,8 @@ async def do_sell(request: Request, product_id: int, quantity: float = Form(...)
     """
     return page("Done", body, user)
 
+
+# ============ CATEGORIES & REPORTS ============
 
 @app.get("/categories", response_class=HTMLResponse)
 def categories_list(request: Request):
