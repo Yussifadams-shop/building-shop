@@ -18,6 +18,9 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = FastAPI(title="Building Materials Shop")
+SHOP_NAME = "OBOLO TILES & CEMENT"
+SHOP_PHONE = "053500108"
+SHOP_ADDRESS = "MENZEZOR, GHANA"
 
 USERS = {
     "admin": "CementShop2026!",
@@ -67,7 +70,7 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 </head>
 <body>
 <div class="header">
-<h1>🏗️ Building Shop</h1>
+<h1>🏗️ <h1>🏗️ {SHOP_NAME}</h1></h1>
 <div>
 {"<a href='/' >Home</a><a href='/products'>Materials</a><a href='/add'>Add</a><a href='/sell'>New Sale</a><a href='/cart'>Cart</a><a href='/categories'>Categories</a><a href='/reports'>Reports</a>" if user else ""}
 {user_bar}
@@ -551,13 +554,10 @@ def receipt(request: Request, sale_id: int):
         rows += f"<tr><td>{it['product_name']}</td><td>{it['quantity']}</td><td>GHS {float(it['unit_price']):,.2f}</td><td>GHS {float(it['line_total']):,.2f}</td></tr>"
 
     body = f"""
-    <div class="card" id="receipt">
-        <h2 style="text-align:center;">🏗️ Building Shop</h2>
-        <p style="text-align:center;">Sale Receipt</p>
-        <hr>
-        <p><strong>Invoice:</strong> {sale['invoice_no']}</p>
-        <p><strong>Date:</strong> {sale['created_at'][:16]}</p>
-        <p><strong>Cashier:</strong> {sale.get('user_id','')}</p>
+        <div class="card" id="receipt">
+        <h2 style="text-align:center;">🏗️ {SHOP_NAME}</h2>
+        <p style="text-align:center;">{SHOP_ADDRESS}</p>
+        <p style="text-align:center;">📞 {SHOP_PHONE}</p>
         <hr>
         <table>
             <tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr>
