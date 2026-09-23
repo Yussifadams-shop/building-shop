@@ -1,4 +1,5 @@
 import os
+import json
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -61,13 +62,14 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .stat .num {{ font-size: 28px; font-weight: bold; color: #1e40af; }}
 .stat .label {{ color: #666; font-size: 13px; }}
 .login-box {{ max-width: 400px; margin: 80px auto; }}
+.cart-total {{ background: #fef3c7; padding: 15px; border-radius: 8px; margin-top: 10px; font-size: 18px; }}
 </style>
 </head>
 <body>
 <div class="header">
 <h1>🏗️ Building Shop</h1>
 <div>
-{"<a href='/' >Home</a><a href='/products'>Materials</a><a href='/add'>Add</a><a href='/sell'>New Sale</a><a href='/categories'>Categories</a><a href='/reports'>Reports</a>" if user else ""}
+{"<a href='/' >Home</a><a href='/products'>Materials</a><a href='/add'>Add</a><a href='/sell'>New Sale</a><a href='/cart'>Cart</a><a href='/categories'>Categories</a><a href='/reports'>Reports</a>" if user else ""}
 {user_bar}
 </div>
 </div>
@@ -96,7 +98,7 @@ def login_page(error: str = ""):
         </div>
     </div>
     """
-    return page("Login", body)
+    return HTMLResponse(content=page("Login", body))
 
 
 @app.post("/login")
@@ -112,6 +114,22 @@ async def do_login(username: str = Form(...), password: str = Form(...)):
 def logout():
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(COOKIE_NAME)
+    return response
+
+
+# ============ CART HELPERS ============
+
+def get_cart(request: Request):
+    raw = request.cookies.get("cart", "[]")
+    try:
+        return json.loads(raw)
+    except Exception:
+        return []
+
+
+def save_cart(cart):
+    response = RedirectResponse("/cart", status_code=303)
+    response.set_cookie("cart", json.dumps(cart), max_age=60*60*6)
     return response
 
 
@@ -142,10 +160,11 @@ def home(request: Request):
         <a href="/add" class="btn">Add Material</a>
         <a href="/products" class="btn">View All</a>
         <a href="/sell" class="btn btn-success">New Sale</a>
+        <a href="/cart" class="btn">🛒 Cart</a>
         <a href="/reports" class="btn">📊 Reports</a>
     </div>
     """
-    return page("Dashboard", body, user)
+    return HTMLResponse(content=page("Dashboard", body, user))
 
 
 # ============ PRODUCTS ============
@@ -188,7 +207,7 @@ def products_list(request: Request, search: str = ""):
         {rows if rows else "<tr><td colspan='5'>No materials. <a href='/add'>Add one</a>.</td></tr>"}
     </table></div>
     """
-    return page("Materials", body, user)
+    return HTMLResponse(content=page("Materials", body, user))
 
 
 @app.get("/add", response_class=HTMLResponse)
@@ -217,7 +236,7 @@ def add_form(request: Request):
         </form>
     </div>
     """
-    return page("Add", body, user)
+    return HTMLResponse(content=page("Add", body, user))
 
 
 @app.post("/add")
@@ -263,7 +282,7 @@ def edit_form(request: Request, product_id: int):
         </form>
     </div>
     """
-    return page("Edit", body, user)
+    return HTMLResponse(content=page("Edit", body, user))
 
 
 @app.post("/edit/{product_id}")
@@ -299,7 +318,7 @@ def delete_product(request: Request, product_id: int):
     return RedirectResponse("/products", status_code=303)
 
 
-# ============ SALES ============
+# ============ CART & SALES ============
 
 @app.get("/sell", response_class=HTMLResponse)
 def sell_page(request: Request):
@@ -311,103 +330,257 @@ def sell_page(request: Request):
     rows = ""
     for p in products:
         qty = float(p.get("quantity_in_stock", 0))
-        rows += f"<tr><td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td><td>{qty} {p.get('unit','')}</td><td>GHS {float(p['selling_price']):,.2f}</td><td><a href='/sell/{p['id']}' class='btn btn-success btn-small'>Sell</a></td></tr>"
+        rows += f"""<tr>
+            <td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td>
+            <td>{qty} {p.get('unit','')}</td>
+            <td>GHS {float(p['selling_price']):,.2f}</td>
+            <td>
+                <form method="post" action="/cart/add" style="display:flex;gap:5px;align-items:center;">
+                    <input type="hidden" name="product_id" value="{p['id']}">
+                    <input type="number" step="0.01" name="quantity" value="1" min="0.01" max="{qty}" style="width:70px;margin:0;padding:6px;">
+                    <button type="submit" class="btn btn-success btn-small">+ Add</button>
+                </form>
+            </td>
+        </tr>"""
     body = f"""
-    <h2>New Sale — Pick a Material</h2>
-    <div class="card"><table>
-        <tr><th>Material</th><th>Stock</th><th>Price</th><th></th></tr>
-        {rows if rows else "<tr><td colspan='4'>No materials. <a href='/add'>Add one</a>.</td></tr>"}
-    </table></div>
+    <h2>New Sale — Add Items to Cart</h2>
+    <div class="card">
+        <a href="/cart" class="btn btn-success" style="margin-bottom:15px;">🛒 View Cart & Checkout</a>
+        <table>
+            <tr><th>Material</th><th>Stock</th><th>Price</th><th>Add to Cart</th></tr>
+            {rows if rows else "<tr><td colspan='4'>No materials. <a href='/add'>Add one</a>.</td></tr>"}
+        </table>
+    </div>
     """
-    return page("Sell", body, user)
+    return HTMLResponse(content=page("Sell", body, user))
 
 
-@app.get("/sell/{product_id}", response_class=HTMLResponse)
-def sell_form(request: Request, product_id: int):
+@app.post("/cart/add")
+async def cart_add(request: Request, product_id: int = Form(...), quantity: float = Form(...)):
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
 
-    p = supabase.table("products").select("*").eq("id", product_id).single().execute().data
+    cart = get_cart(request)
+
+    # check if product already in cart
+    found = False
+    for item in cart:
+        if item["product_id"] == product_id:
+            item["quantity"] += quantity
+            found = True
+            break
+
+    if not found:
+        cart.append({"product_id": product_id, "quantity": quantity})
+
+    return save_cart(cart)
+
+
+@app.get("/cart", response_class=HTMLResponse)
+def cart_page(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    cart = get_cart(request)
+
+    if not cart:
+        body = """
+        <h2>🛒 Your Cart</h2>
+        <div class="card">
+            <p>Your cart is empty.</p>
+            <a href="/sell" class="btn">Start Adding Items</a>
+        </div>
+        """
+        return HTMLResponse(content=page("Cart", body, user))
+
+    # fetch product details
+    ids = [c["product_id"] for c in cart]
+    products = supabase.table("products").select("*").in_("id", ids).execute().data
+    product_map = {p["id"]: p for p in products}
+
+    rows = ""
+    total = 0
+    for item in cart:
+        p = product_map.get(item["product_id"])
+        if not p:
+            continue
+        line = float(p["selling_price"]) * item["quantity"]
+        total += line
+        rows += f"""<tr>
+            <td>{p['name']}</td>
+            <td>{item['quantity']} {p.get('unit','')}</td>
+            <td>GHS {float(p['selling_price']):,.2f}</td>
+            <td>GHS {line:,.2f}</td>
+            <td>
+                <form method="post" action="/cart/remove" style="display:inline;">
+                    <input type="hidden" name="product_id" value="{p['id']}">
+                    <button type="submit" class="btn btn-danger btn-small">Remove</button>
+                </form>
+            </td>
+        </tr>"""
+
     body = f"""
-    <h2>Sell: {p['name']}</h2>
+    <h2>🛒 Your Cart</h2>
     <div class="card">
-        <p>Available: <strong>{p['quantity_in_stock']} {p['unit']}</strong></p>
-        <p>Price: <strong>GHS {float(p['selling_price']):,.2f}</strong></p>
-        <form method="post" action="/sell/{product_id}">
-            <label>Quantity</label><input type="number" step="0.01" name="quantity" required min="0.01" max="{p['quantity_in_stock']}">
-            <button type="submit" class="btn-success">Complete Sale</button>
-            <a href="/sell" class="btn">Cancel</a>
+        <table>
+            <tr><th>Material</th><th>Qty</th><th>Price</th><th>Subtotal</th><th></th></tr>
+            {rows}
+        </table>
+        <div class="cart-total">
+            <strong>Total: GHS {total:,.2f}</strong>
+        </div>
+        <br>
+        <form method="post" action="/cart/checkout">
+            <button type="submit" class="btn btn-success">✅ Complete Sale</button>
+            <a href="/sell" class="btn">+ Add More Items</a>
+            <a href="/cart/clear" class="btn btn-danger">Clear Cart</a>
         </form>
     </div>
     """
-    return page("Sell", body, user)
+    return HTMLResponse(content=page("Cart", body, user))
 
 
-@app.post("/sell/{product_id}")
-async def do_sell(request: Request, product_id: int, quantity: float = Form(...)):
+@app.post("/cart/remove")
+async def cart_remove(request: Request, product_id: int = Form(...)):
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
 
-    p = supabase.table("products").select("*").eq("id", product_id).single().execute().data
-    if float(p["quantity_in_stock"]) < quantity:
-        raise HTTPException(400, "Not enough stock")
+    cart = get_cart(request)
+    cart = [item for item in cart if item["product_id"] != product_id]
+    return save_cart(cart)
 
-    unit_price = float(p["selling_price"])
-    cost_price = float(p["cost_price"])
-    line_total = quantity * unit_price
 
-    # Create the sale
+@app.get("/cart/clear")
+def cart_clear(request: Request):
+    response = RedirectResponse("/sell", status_code=303)
+    response.delete_cookie("cart")
+    return response
+
+
+@app.post("/cart/checkout")
+async def cart_checkout(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    cart = get_cart(request)
+    if not cart:
+        return RedirectResponse("/sell", status_code=303)
+
+    ids = [c["product_id"] for c in cart]
+    products = supabase.table("products").select("*").in_("id", ids).execute().data
+    product_map = {p["id"]: p for p in products}
+
+    # validate stock
+    for item in cart:
+        p = product_map.get(item["product_id"])
+        if not p:
+            continue
+        if float(p["quantity_in_stock"]) < item["quantity"]:
+            raise HTTPException(400, f"Not enough stock for {p['name']}")
+
+    # create sale
     invoice_no = f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    subtotal = 0.0
+    for item in cart:
+        p = product_map[item["product_id"]]
+        subtotal += float(p["selling_price"]) * item["quantity"]
+
     sale_data = {
         "invoice_no": invoice_no,
-        "subtotal": line_total,
-        "total": line_total,
+        "subtotal": subtotal,
+        "total": subtotal,
         "payment_method": "cash",
-        "amount_paid": line_total,
+        "amount_paid": subtotal,
         "status": "completed",
         "user_id": user
     }
     sale_result = supabase.table("sales").insert(sale_data).execute()
     sale_id = sale_result.data[0]["id"]
 
-    # Create the sale item
-    supabase.table("sale_items").insert({
-        "sale_id": sale_id,
-        "product_id": product_id,
-        "product_name": p["name"],
-        "quantity": quantity,
-        "unit_price": unit_price,
-        "cost_price": cost_price,
-        "line_total": line_total
-    }).execute()
+    # create sale items, reduce stock, log movements
+    for item in cart:
+        p = product_map[item["product_id"]]
+        qty = item["quantity"]
+        unit_price = float(p["selling_price"])
+        cost_price = float(p["cost_price"])
+        line_total = qty * unit_price
 
-    # Reduce stock
-    new_qty = float(p["quantity_in_stock"]) - quantity
-    supabase.table("products").update({"quantity_in_stock": new_qty}).eq("id", product_id).execute()
+        supabase.table("sale_items").insert({
+            "sale_id": sale_id,
+            "product_id": p["id"],
+            "product_name": p["name"],
+            "quantity": qty,
+            "unit_price": unit_price,
+            "cost_price": cost_price,
+            "line_total": line_total
+        }).execute()
 
-    # Log movement
-    supabase.table("stock_movements").insert({
-        "product_id": product_id,
-        "movement_type": "OUT",
-        "quantity": quantity,
-        "note": f"{invoice_no} — {p['name']} x {quantity} — {user}"
-    }).execute()
+        new_qty = float(p["quantity_in_stock"]) - qty
+        supabase.table("products").update({"quantity_in_stock": new_qty}).eq("id", p["id"]).execute()
+
+        supabase.table("stock_movements").insert({
+            "product_id": p["id"],
+            "movement_type": "OUT",
+            "quantity": qty,
+            "note": f"{invoice_no} — {p['name']} x {qty} — {user}"
+        }).execute()
+
+    # clear cart
+    response = RedirectResponse(f"/receipt/{sale_id}", status_code=303)
+    response.delete_cookie("cart")
+    return response
+
+
+# ============ RECEIPT ============
+
+@app.get("/receipt/{sale_id}", response_class=HTMLResponse)
+def receipt(request: Request, sale_id: int):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    sale = supabase.table("sales").select("*").eq("id", sale_id).single().execute().data
+    items = supabase.table("sale_items").select("*").eq("sale_id", sale_id).execute().data
+
+    rows = ""
+    for it in items:
+        rows += f"<tr><td>{it['product_name']}</td><td>{it['quantity']}</td><td>GHS {float(it['unit_price']):,.2f}</td><td>GHS {float(it['line_total']):,.2f}</td></tr>"
 
     body = f"""
-    <div class="card">
-        <h2>✅ Sale Complete</h2>
-        <p><strong>Invoice:</strong> {invoice_no}</p>
-        <p><strong>Item:</strong> {quantity} {p['unit']} of {p['name']}</p>
-        <p><strong>Total:</strong> GHS {line_total:,.2f}</p>
-        <p>Remaining stock: {new_qty} {p['unit']}</p>
-        <a href="/sell" class="btn btn-success">Sell Another</a>
-        <a href="/reports" class="btn">View Reports</a>
+    <div class="card" id="receipt">
+        <h2 style="text-align:center;">🏗️ Building Shop</h2>
+        <p style="text-align:center;">Sale Receipt</p>
+        <hr>
+        <p><strong>Invoice:</strong> {sale['invoice_no']}</p>
+        <p><strong>Date:</strong> {sale['created_at'][:16]}</p>
+        <p><strong>Cashier:</strong> {sale.get('user_id','')}</p>
+        <hr>
+        <table>
+            <tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr>
+            {rows}
+        </table>
+        <hr>
+        <h3 style="text-align:right;">Total: GHS {float(sale['total']):,.2f}</h3>
+        <p style="text-align:center;">Thank you for your business!</p>
+    </div>
+    <div style="text-align:center;margin-top:15px;">
+        <button onclick="window.print()" class="btn btn-success">🖨️ Print Receipt</button>
+        <a href="/sell" class="btn">New Sale</a>
         <a href="/" class="btn">Dashboard</a>
     </div>
+    <style>
+    @media print {{
+        .header, .btn, button {{ display: none !important; }}
+        body {{ background: white; }}
+        .card {{ box-shadow: none; }}
+    }}
+    </style>
     """
-    return HTMLResponse(content=page("Sale Complete", body, user))
+    return HTMLResponse(content=page("Receipt", body, user))
 
 
 # ============ CATEGORIES ============
@@ -421,7 +594,7 @@ def categories_list(request: Request):
     cats = supabase.table("categories").select("*").order("name").execute().data
     rows = "".join(f"<tr><td>{c['name']}</td><td>{c.get('description','')}</td></tr>" for c in cats)
     body = f"<h2>Categories</h2><div class='card'><table><tr><th>Category</th><th>Description</th></tr>{rows}</table></div>"
-    return page("Categories", body, user)
+    return HTMLResponse(content=page("Categories", body, user))
 
 
 # ============ REPORTS ============
@@ -432,10 +605,8 @@ def reports(request: Request):
     if not user:
         return RedirectResponse("/login", status_code=303)
 
-    # fetch all sales
     sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
 
-    # compute totals by period
     now = datetime.now()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
@@ -464,7 +635,6 @@ def reports(request: Request):
             if d >= month_start:
                 month_total += amount
 
-    # top selling products
     items = supabase.table("sale_items").select("*").execute().data
     product_stats = {}
     for it in items:
@@ -485,10 +655,9 @@ def reports(request: Request):
         for name, data in top
     )
 
-    # recent sales
     recent_rows = ""
     for s in sales[:20]:
-        recent_rows += f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>{s.get('user_id','')}</td></tr>"
+        recent_rows += f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>{s.get('user_id','')}</td><td><a href='/receipt/{s['id']}' class='btn btn-small'>View</a></td></tr>"
 
     body = f"""
     <h2>Reports</h2>
@@ -511,12 +680,12 @@ def reports(request: Request):
     <div class="card">
         <h3>🧾 Recent Sales (last 20)</h3>
         <table>
-            <tr><th>Date</th><th>Invoice</th><th>Total</th><th>User</th></tr>
-            {recent_rows if recent_rows else "<tr><td colspan='4'>No sales yet.</td></tr>"}
+            <tr><th>Date</th><th>Invoice</th><th>Total</th><th>User</th><th></th></tr>
+            {recent_rows if recent_rows else "<tr><td colspan='5'>No sales yet.</td></tr>"}
         </table>
     </div>
     """
-    return page("Reports", body, user)
+    return HTMLResponse(content=page("Reports", body, user))
 
 
 @app.get("/health")
