@@ -899,6 +899,153 @@ def reports(request: Request):
     return HTMLResponse(content=page("Reports", body, username, info.get("role")))
 
 
-@app.get("/health")
+@app.get("/health")  # ============ EXPORT TO EXCEL ============
+
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from io import BytesIO
+
+
+def style_header(ws, headers):
+    """Apply bold + colored header to a worksheet row 1"""
+    for col_num, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_num, value=header)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="1E40AF", end_color="1E40AF", fill_type="solid")
+        cell.alignment = Alignment(horizontal="center")
+
+
+@app.get("/export/sales")
+def export_sales(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can export data")
+
+    sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sales"
+
+    headers = ["Date", "Invoice", "Subtotal", "Discount", "Total", "Payment", "Cashier"]
+    style_header(ws, headers)
+
+    for s in sales:
+        ws.append([
+            s.get("created_at", "")[:19].replace("T", " "),
+            s.get("invoice_no", ""),
+            float(s.get("subtotal", 0)),
+            float(s.get("discount", 0)),
+            float(s.get("total", 0)),
+            s.get("payment_method", ""),
+            s.get("cashier_name") or s.get("user_id", ""),
+        ])
+
+    # column widths
+    widths = [20, 22, 12, 12, 12, 15, 15]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=OBOLO_sales_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
+    )
+
+
+@app.get("/export/products")
+def export_products(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can export data")
+
+    products = supabase.table("products").select("*").eq("is_active", True).order("name").execute().data
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Materials"
+
+    headers = ["Name", "SKU", "Unit", "Stock", "Cost Price", "Selling Price", "Reorder Level", "Location"]
+    style_header(ws, headers)
+
+    for p in products:
+        ws.append([
+            p.get("name", ""),
+            p.get("sku", ""),
+            p.get("unit", ""),
+            float(p.get("quantity_in_stock", 0)),
+            float(p.get("cost_price", 0)),
+            float(p.get("selling_price", 0)),
+            float(p.get("reorder_level", 0)),
+            p.get("location") or "",
+        ])
+
+    widths = [30, 15, 10, 10, 12, 14, 14, 15]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=OBOLO_materials_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
+    )
+
+
+@app.get("/export/stock")
+def export_stock(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can export data")
+
+    movements = supabase.table("stock_movements").select("*").order("created_at", desc=True).limit(5000).execute().data
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Stock Movements"
+
+    headers = ["Date", "Type", "Quantity", "Note"]
+    style_header(ws, headers)
+
+    for m in movements:
+        ws.append([
+            m.get("created_at", "")[:19].replace("T", " "),
+            m.get("movement_type", ""),
+            float(m.get("quantity", 0)),
+            m.get("note", ""),
+        ])
+
+    widths = [20, 12, 12, 50]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=OBOLO_stock_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
+    )
+
+
 def health():
     return {"status": "ok"}
