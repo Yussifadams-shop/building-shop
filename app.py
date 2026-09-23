@@ -20,7 +20,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI(title="Building Materials Shop")
 
 USERS = {
-    "admin": "admin123",
+    "admin": "CementShop2026!",
 }
 
 
