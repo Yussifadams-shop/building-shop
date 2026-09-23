@@ -407,7 +407,7 @@ async def do_sell(request: Request, product_id: int, quantity: float = Form(...)
         <a href="/" class="btn">Dashboard</a>
     </div>
     """
-        return HTMLResponse(content=page("Sale Complete", body, user))
+    return HTMLResponse(content=page("Sale Complete", body, user))
 
 
 # ============ CATEGORIES ============
