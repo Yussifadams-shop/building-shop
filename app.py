@@ -917,7 +917,7 @@ def style_header(ws, headers):
 
 
 @app.get("/export/sales")
-def export_sales(request: Request):
+def export_sales(request: Request):S
     username = get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=303)
