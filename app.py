@@ -584,6 +584,7 @@ def receipt(request: Request, sale_id: int):
 
 
 # ============ CATEGORIES ============
+# ============ CATEGORIES ============
 
 @app.get("/categories", response_class=HTMLResponse)
 def categories_list(request: Request):
@@ -592,11 +593,85 @@ def categories_list(request: Request):
         return RedirectResponse("/login", status_code=303)
 
     cats = supabase.table("categories").select("*").order("name").execute().data
-    rows = "".join(f"<tr><td>{c['name']}</td><td>{c.get('description','')}</td></tr>" for c in cats)
-    body = f"<h2>Categories</h2><div class='card'><table><tr><th>Category</th><th>Description</th></tr>{rows}</table></div>"
+
+    # count products per category
+    products = supabase.table("products").select("*").eq("is_active", True).execute().data
+    counts = {}
+    for p in products:
+        cid = p.get("category_id")
+        counts[cid] = counts.get(cid, 0) + 1
+
+    rows = ""
+    for c in cats:
+        count = counts.get(c["id"], 0)
+        rows += f"""<tr>
+            <td><strong>{c['name']}</strong></td>
+            <td>{c.get('description','')}</td>
+            <td>{count} material{'s' if count != 1 else ''}</td>
+            <td>
+                <a href='/categories/delete/{c['id']}' class='btn btn-danger btn-small' onclick="return confirm('Delete category {c['name']}? Materials will be moved to Others.')">🗑️ Delete</a>
+            </td>
+        </tr>"""
+
+    body = f"""
+    <h2>Categories</h2>
+
+    <div class="card">
+        <h3>➕ Add New Category</h3>
+        <form method="post" action="/categories/add">
+            <label>Name</label>
+            <input type="text" name="name" required placeholder="e.g. Roofing">
+            <label>Description (optional)</label>
+            <input type="text" name="description" placeholder="e.g. Roofing sheets and accessories">
+            <button type="submit" class="btn btn-success">Add Category</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3>All Categories ({len(cats)})</h3>
+        <table>
+            <tr><th>Category</th><th>Description</th><th>Materials</th><th></th></tr>
+            {rows if rows else "<tr><td colspan='4'>No categories yet.</td></tr>"}
+        </table>
+    </div>
+    """
     return HTMLResponse(content=page("Categories", body, user))
 
 
+@app.post("/categories/add")
+async def category_add(request: Request, name: str = Form(...), description: str = Form("")):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    existing = supabase.table("categories").select("*").eq("name", name).execute().data
+    if not existing:
+        supabase.table("categories").insert({"name": name, "description": description or None}).execute()
+
+    return RedirectResponse("/categories", status_code=303)
+
+
+@app.get("/categories/delete/{category_id}")
+def category_delete(request: Request, category_id: int):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    # find or create "Others" category
+    others = supabase.table("categories").select("*").eq("name", "Others").execute().data
+    if others:
+        others_id = others[0]["id"]
+    else:
+        new_others = supabase.table("categories").insert({"name": "Others", "description": "Anything that does not fit above"}).execute()
+        others_id = new_others.data[0]["id"]
+
+    # move any products from this category to Others
+    supabase.table("products").update({"category_id": others_id}).eq("category_id", category_id).execute()
+
+    # delete the category
+    supabase.table("categories").delete().eq("id", category_id).execute()
+
+    return RedirectResponse("/categories", status_code=303)
 # ============ REPORTS ============
 
 @app.get("/reports", response_class=HTMLResponse)
