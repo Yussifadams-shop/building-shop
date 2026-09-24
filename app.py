@@ -35,8 +35,10 @@ def page(title, body, user=None, role=None):
         menu = ("<a href='/'>Home</a>"
                 "<a href='/products'>Materials</a>"
                 "<a href='/customers'>Customers</a>"
+                "<a href='/add'>Add</a>"
                 "<a href='/sell'>New Sale</a>"
                 "<a href='/cart'>Cart</a>"
+                "<a href='/categories'>Categories</a>"
                 "<a href='/reports'>Reports</a>"
                 "<a href='/users'>Users</a>")
     elif user and role == "cashier":
@@ -51,7 +53,7 @@ def page(title, body, user=None, role=None):
     user_bar = ""
     if user:
         role_display = f" ({role})" if role else ""
-        user_bar = f'<span style="margin-left:15px;font-size:13px;">👤 {user}{role_display} · <a href="/logout">Logout</a></span>'
+        user_bar = f'<span class="user-bar">👤 {user}{role_display} · <a href="/logout">Logout</a></span>'
 
     return f"""<!DOCTYPE html>
 <html>
@@ -61,18 +63,30 @@ def page(title, body, user=None, role=None):
 <style>
 * {{ box-sizing: border-box; }}
 body {{ font-family: Arial, sans-serif; margin: 0; background: #f4f4f7; color: #222; }}
-.header {{ background: #1e40af; color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }}
-.header h1 {{ margin: 0; font-size: 20px; display: inline-block; }}
-.header a {{ color: white; text-decoration: none; margin-left: 15px; font-size: 14px; }}
-.container {{ max-width: 1000px; margin: 20px auto; padding: 0 15px; }}
+
+.header {{ background: #1e40af; color: white; padding: 15px 20px; }}
+.header-top {{ display: flex; justify-content: space-between; align-items: center; }}
+.header h1 {{ margin: 0; font-size: 20px; }}
+.menu-toggle {{ display: none; background: transparent; border: 2px solid white; color: white; font-size: 22px; padding: 5px 12px; border-radius: 5px; cursor: pointer; }}
+.menu-toggle:hover {{ background: rgba(255,255,255,0.15); }}
+.menu-links {{ display: flex; flex-wrap: wrap; align-items: center; margin-top: 8px; }}
+.menu-links a {{ color: white; text-decoration: none; margin-right: 15px; font-size: 14px; padding: 4px 0; }}
+.menu-links a:hover {{ text-decoration: underline; }}
+.user-bar {{ color: white; font-size: 13px; margin-left: auto; }}
+.user-bar a {{ color: white; text-decoration: underline; }}
+
+.container {{ max-width: 1100px; margin: 20px auto; padding: 0 15px; }}
 .card {{ background: white; border-radius: 8px; padding: 20px; margin-bottom: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }}
 h2 {{ color: #1e40af; margin-top: 0; }}
 h3 {{ color: #1e40af; margin-top: 15px; }}
-table {{ width: 100%; border-collapse: collapse; }}
+
+.table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+table {{ width: 100%; border-collapse: collapse; min-width: 500px; }}
 th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #eee; }}
 th {{ background: #f9fafb; }}
+
 input, select {{ width: 100%; padding: 10px; margin: 5px 0 15px; border: 1px solid #ddd; border-radius: 5px; font-size: 15px; }}
-button, .btn {{ background: #1e40af; color: white; padding: 10px 16px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; }}
+button, .btn {{ background: #1e40af; color: white; padding: 10px 16px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; margin: 3px 0; }}
 button:hover, .btn:hover {{ background: #1e3a8a; }}
 .btn-success {{ background: #16a34a; }}
 .btn-danger {{ background: #dc2626; }}
@@ -83,18 +97,38 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .owed {{ color: #dc2626; font-weight: bold; font-size: 16px; }}
 .clear {{ color: #16a34a; font-weight: bold; }}
 .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
-@media (max-width: 600px) {{ .grid {{ grid-template-columns: 1fr; }} }}
 .stat {{ text-align: center; padding: 15px; }}
 .stat .num {{ font-size: 28px; font-weight: bold; color: #1e40af; }}
 .stat .label {{ color: #666; font-size: 13px; }}
 .login-box {{ max-width: 400px; margin: 80px auto; }}
 .cart-total {{ background: #fef3c7; padding: 15px; border-radius: 8px; margin-top: 10px; font-size: 18px; }}
+
+/* ---------- MOBILE ---------- */
+@media (max-width: 768px) {{
+    .menu-toggle {{ display: block; }}
+    .menu-links {{ display: none; flex-direction: column; align-items: stretch; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25); }}
+    .menu-links.open {{ display: flex; }}
+    .menu-links a {{ display: block; padding: 14px 5px; border-bottom: 1px solid rgba(255,255,255,0.15); margin: 0; font-size: 16px; }}
+    .user-bar {{ display: block; margin: 12px 0 0 0; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25); font-size: 14px; }}
+    .container {{ margin: 10px auto; padding: 0 10px; }}
+    .card {{ padding: 15px; }}
+    .grid {{ grid-template-columns: 1fr; }}
+    .stat .num {{ font-size: 24px; }}
+    h2 {{ font-size: 20px; }}
+    table {{ min-width: 450px; }}
+    th, td {{ padding: 8px; font-size: 14px; }}
+    button, .btn {{ width: 100%; text-align: center; margin: 5px 0; }}
+    .btn-small {{ width: auto; }}
+}}
 </style>
 </head>
 <body>
 <div class="header">
+<div class="header-top">
 <h1>🏗️ {SHOP_NAME}</h1>
-<div>
+<button class="menu-toggle" onclick="document.getElementById('menuLinks').classList.toggle('open')">☰</button>
+</div>
+<div class="menu-links" id="menuLinks">
 {menu}
 {user_bar}
 </div>
@@ -190,11 +224,11 @@ def home(request: Request):
     </div>
     <div class="grid">
         <div class="card stat"><div class="num">{len(customers)}</div><div class="label">Customers</div></div>
-        <div class="card stat"><div class="num" style="color:#dc2626;">GHS {total_owed:,.2f}</div><div class="label">Total Owed by Customers</div></div>
+        <div class="card stat"><div class="num" style="color:#dc2626;">GHS {total_owed:,.2f}</div><div class="label">Total Owed</div></div>
     </div>
     <div class="card">
         <h2>Low Stock ({len(low_stock)})</h2>
-        {f"<table><tr><th>Material</th><th>In Stock</th></tr>{low_rows}</table>" if low_stock else "<p>All good!</p>"}
+        {f"<div class='table-wrap'><table><tr><th>Material</th><th>In Stock</th></tr>{low_rows}</table></div>" if low_stock else "<p>All good!</p>"}
     </div>
     <div class="card">
         {admin_actions}
@@ -250,12 +284,12 @@ def products_list(request: Request, search: str = ""):
     <h2>All Materials</h2>
     <div class="card">
         {add_button}
-        <form method="get" style="display:flex;gap:10px;margin-top:10px;">
-            <input type="text" name="search" placeholder="Search..." value="{search}">
-            <button>Search</button>
+        <form method="get" style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;">
+            <input type="text" name="search" placeholder="Search..." value="{search}" style="flex:1;min-width:200px;">
+            <button type="submit">Search</button>
         </form>
     </div>
-    <div class="card"><table>{headers}{rows if rows else "<tr><td colspan='5'>No materials yet.</td></tr>"}</table></div>
+    <div class="card"><div class="table-wrap"><table>{headers}{rows if rows else "<tr><td colspan='5'>No materials yet.</td></tr>"}</table></div></div>
     """
     return HTMLResponse(content=page("Materials", body, username, role))
 
@@ -401,22 +435,24 @@ def customers_list(request: Request, search: str = ""):
     body = f"""
     <h2>👥 Customers</h2>
     <div class="card">
-        <h3>Total Owed by All Customers: <span style="color:#dc2626;">GHS {total_owed:,.2f}</span></h3>
+        <h3>Total Owed: <span style="color:#dc2626;">GHS {total_owed:,.2f}</span></h3>
     </div>
     <div class="card">
         <a href="/customers/add" class="btn btn-success">➕ Add Customer</a>
     </div>
     <div class="card">
-        <form method="get" style="display:flex;gap:10px;">
-            <input type="text" name="search" placeholder="Search by name..." value="{search}">
-            <button>Search</button>
+        <form method="get" style="display:flex;gap:10px;flex-wrap:wrap;">
+            <input type="text" name="search" placeholder="Search by name..." value="{search}" style="flex:1;min-width:200px;">
+            <button type="submit">Search</button>
         </form>
     </div>
     <div class="card">
+        <div class="table-wrap">
         <table>
             <tr><th>Customer</th><th>Address</th><th>Balance Owed</th><th>Actions</th></tr>
-            {rows if rows else "<tr><td colspan='4'>No customers yet. Add one to start tracking credit.</td></tr>"}
+            {rows if rows else "<tr><td colspan='4'>No customers yet.</td></tr>"}
         </table>
+        </div>
     </div>
     """
     return HTMLResponse(content=page("Customers", body, username, role))
@@ -440,7 +476,7 @@ def customer_add_form(request: Request):
             <label>Address / Location</label>
             <input type="text" name="address" placeholder="e.g. Menzezor">
             <label>Notes (optional)</label>
-            <input type="text" name="notes" placeholder="e.g. Buys cement regularly">
+            <input type="text" name="notes">
             <button type="submit" class="btn btn-success">Create Customer</button>
             <a href="/customers" class="btn">Cancel</a>
         </form>
@@ -476,13 +512,11 @@ def customer_view(request: Request, customer_id: int):
     c = supabase.table("customers").select("*").eq("id", customer_id).single().execute().data
     balance = float(c.get("balance", 0))
 
-    # sales history for this customer
     sales = supabase.table("sales").select("*").eq("customer_id", customer_id).order("created_at", desc=True).execute().data
     sales_rows = ""
     for s in sales:
         sales_rows += f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>GHS {float(s.get('amount_paid_now',0)):,.2f}</td><td>GHS {float(s.get('amount_on_credit',0)):,.2f}</td></tr>"
 
-    # payments history
     payments = supabase.table("customer_payments").select("*").eq("customer_id", customer_id).order("created_at", desc=True).execute().data
     pay_rows = ""
     for p in payments:
@@ -497,23 +531,24 @@ def customer_view(request: Request, customer_id: int):
         <h3>Current Balance: <span class="{'owed' if balance > 0 else 'clear'}">GHS {balance:,.2f}</span></h3>
         <a href="/customers/pay/{customer_id}" class="btn btn-success">💰 Record Payment</a>
     </div>
-
     <div class="card">
         <h3>📋 Purchase History</h3>
+        <div class="table-wrap">
         <table>
             <tr><th>Date</th><th>Invoice</th><th>Total</th><th>Paid</th><th>Credit</th></tr>
             {sales_rows if sales_rows else "<tr><td colspan='5'>No purchases yet.</td></tr>"}
         </table>
+        </div>
     </div>
-
     <div class="card">
         <h3>💵 Payment History</h3>
+        <div class="table-wrap">
         <table>
             <tr><th>Date</th><th>Amount</th><th>Method</th><th>Note</th></tr>
             {pay_rows if pay_rows else "<tr><td colspan='4'>No payments yet.</td></tr>"}
         </table>
+        </div>
     </div>
-
     <div class="card">
         <a href="/customers" class="btn">← Back to Customers</a>
     </div>
@@ -545,7 +580,7 @@ def customer_pay_form(request: Request, customer_id: int):
                 <option value="Card">💳 Card</option>
             </select>
             <label>Note (optional)</label>
-            <input type="text" name="note" placeholder="e.g. Part payment">
+            <input type="text" name="note">
             <button type="submit" class="btn btn-success">Record Payment</button>
             <a href="/customers/view/{customer_id}" class="btn">Cancel</a>
         </form>
@@ -596,7 +631,7 @@ def sell_page(request: Request):
             <td>{qty} {p.get('unit','')}</td>
             <td>GHS {float(p['selling_price']):,.2f}</td>
             <td>
-                <form method="post" action="/cart/add" style="display:flex;gap:5px;align-items:center;">
+                <form method="post" action="/cart/add" style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
                     <input type="hidden" name="product_id" value="{p['id']}">
                     <input type="number" step="0.01" name="quantity" value="1" min="0.01" max="{qty}" style="width:70px;margin:0;padding:6px;">
                     <button type="submit" class="btn btn-success btn-small">+ Add</button>
@@ -607,10 +642,12 @@ def sell_page(request: Request):
     <h2>New Sale — Add Items to Cart</h2>
     <div class="card">
         <a href="/cart" class="btn btn-success" style="margin-bottom:15px;">🛒 View Cart & Checkout</a>
+        <div class="table-wrap">
         <table>
             <tr><th>Material</th><th>Stock</th><th>Price</th><th>Add to Cart</th></tr>
             {rows if rows else "<tr><td colspan='4'>No materials.</td></tr>"}
         </table>
+        </div>
     </div>
     """
     return HTMLResponse(content=page("Sell", body, username, role))
@@ -674,17 +711,18 @@ def cart_page(request: Request):
             </td>
         </tr>"""
 
-    # fetch customers for dropdown
     customers = supabase.table("customers").select("*").eq("is_active", True).order("name").execute().data
     cust_options = "".join(f"<option value='{c['id']}'>{c['name']} — {c.get('phone','') or ''}</option>" for c in customers)
 
     body = f"""
     <h2>🛒 Your Cart</h2>
     <div class="card">
+        <div class="table-wrap">
         <table>
             <tr><th>Material</th><th>Qty</th><th>Price</th><th>Subtotal</th><th></th></tr>
             {rows}
         </table>
+        </div>
         <div class="cart-total"><strong>Subtotal: GHS {total:,.2f}</strong></div>
         <br>
         <form method="post" action="/cart/checkout">
@@ -791,7 +829,6 @@ async def cart_checkout(
         except Exception:
             cust_obj = None
 
-    # determine credit
     credit_amount = 0.0
     if payment_method == "Credit" and cust_obj:
         credit_amount = final_total - amount_paid_now
@@ -829,7 +866,6 @@ async def cart_checkout(
         supabase.table("products").update({"quantity_in_stock": new_qty}).eq("id", p["id"]).execute()
         supabase.table("stock_movements").insert({"product_id": p["id"], "movement_type": "OUT", "quantity": qty, "note": f"{invoice_no} — {p['name']} x {qty} — {username}"}).execute()
 
-    # add credit to customer balance
     if credit_amount > 0 and cust_obj:
         new_balance = float(cust_obj.get("balance", 0)) + credit_amount
         supabase.table("customers").update({"balance": new_balance}).eq("id", cust_obj["id"]).execute()
@@ -873,10 +909,12 @@ def receipt(request: Request, sale_id: int):
         <p><strong>Cashier:</strong> {sale.get('cashier_name') or sale.get('user_id','')}</p>
         {customer_line}
         <hr>
+        <div class="table-wrap">
         <table>
             <tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr>
             {rows}
         </table>
+        </div>
         <hr>
         <p style="text-align:right;">Subtotal: GHS {float(sale['subtotal']):,.2f}</p>
         {f'<p style="text-align:right;">Discount: -GHS {float(sale.get("discount", 0)):,.2f}</p>' if float(sale.get("discount", 0)) > 0 else ''}
@@ -941,10 +979,12 @@ def categories_list(request: Request):
     </div>
     <div class="card">
         <h3>All Categories ({len(cats)})</h3>
+        <div class="table-wrap">
         <table>
             <tr><th>Category</th><th>Description</th><th>Materials</th><th></th></tr>
             {rows if rows else "<tr><td colspan='4'>No categories yet.</td></tr>"}
         </table>
+        </div>
     </div>
     """
     return HTMLResponse(content=page("Categories", body, username, info.get("role")))
@@ -1013,10 +1053,12 @@ def users_list(request: Request):
         <a href="/users/add" class="btn btn-success">➕ Add New User</a>
     </div>
     <div class="card">
+        <div class="table-wrap">
         <table>
             <tr><th>User</th><th>Role</th><th>Status</th><th>Actions</th></tr>
             {rows}
         </table>
+        </div>
     </div>
     """
     return HTMLResponse(content=page("Users", body, username, info.get("role")))
@@ -1200,9 +1242,9 @@ def reports(request: Request):
     <div class="card">
         <h3>📥 Export Data to Excel</h3>
         <a href="/export/sales" class="btn btn-success">📥 All Sales</a>
-        <a href="/export/products" class="btn btn-success" style="margin-left:10px;">📥 All Materials</a>
-        <a href="/export/stock" class="btn btn-success" style="margin-left:10px;">📥 Stock Movements</a>
-        <a href="/export/customers" class="btn btn-success" style="margin-left:10px;">📥 Customers</a>
+        <a href="/export/products" class="btn btn-success">📥 All Materials</a>
+        <a href="/export/stock" class="btn btn-success">📥 Stock Movements</a>
+        <a href="/export/customers" class="btn btn-success">📥 Customers</a>
     </div>
 
     <div class="grid">
@@ -1219,18 +1261,22 @@ def reports(request: Request):
 
     <div class="card">
         <h3>🏆 Top Selling Materials</h3>
+        <div class="table-wrap">
         <table>
             <tr><th>Material</th><th>Qty Sold</th><th>Revenue</th><th>Profit</th></tr>
             {top_rows if top_rows else "<tr><td colspan='4'>No sales yet.</td></tr>"}
         </table>
+        </div>
     </div>
 
     <div class="card">
         <h3>🧾 Recent Sales (last 20)</h3>
+        <div class="table-wrap">
         <table>
             <tr><th>Date</th><th>Invoice</th><th>Customer</th><th>Total</th><th>Cashier</th><th></th></tr>
             {recent_rows if recent_rows else "<tr><td colspan='6'>No sales yet.</td></tr>"}
         </table>
+        </div>
     </div>
     """
     return HTMLResponse(content=page("Reports", body, username, info.get("role")))
