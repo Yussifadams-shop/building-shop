@@ -40,6 +40,7 @@ def page(title, body, user=None, role=None):
                 "<a href='/sell'>New Sale</a>"
                 "<a href='/cart'>Cart</a>"
                 "<a href='/alerts'>🚨 Alerts</a>"
+                "<a href='/summary'>📅 Daily</a>"
                 "<a href='/reports'>Reports</a>"
                 "<a href='/users'>Users</a>")
     elif user and role == "cashier":
@@ -100,6 +101,7 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .login-box {{ max-width: 400px; margin: 80px auto; }}
 .cart-total {{ background: #fef3c7; padding: 15px; border-radius: 8px; margin-top: 10px; font-size: 18px; }}
 .alert-box {{ background: #fee2e2; border: 2px solid #dc2626; }}
+.big-num {{ font-size: 42px; font-weight: bold; color: #1e40af; text-align: center; padding: 20px; }}
 @media (max-width: 768px) {{
     .menu-toggle {{ display: block; }}
     .menu-links {{ display: none; flex-direction: column; align-items: stretch; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25); }}
@@ -115,6 +117,7 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
     th, td {{ padding: 8px; font-size: 14px; }}
     button, .btn {{ width: 100%; text-align: center; margin: 5px 0; }}
     .btn-small {{ width: auto; }}
+    .big-num {{ font-size: 32px; }}
 }}
 </style>
 </head>
@@ -210,7 +213,8 @@ def home(request: Request):
     admin_actions = ""
     if role == "admin":
         admin_actions = ("<a href='/add' class='btn'>Add Material</a>"
-                         "<a href='/reports' class='btn'>📊 Reports</a>")
+                         "<a href='/reports' class='btn'>📊 Reports</a>"
+                         "<a href='/summary' class='btn'>📅 Daily Summary</a>")
 
     alert_card = ""
     if low_stock:
@@ -1134,6 +1138,149 @@ def alerts_page(request: Request):
     </div>
     """
     return HTMLResponse(content=page("Alerts", body, username, info.get("role")))
+
+
+# ============ DAILY SUMMARY ============
+
+@app.get("/summary", response_class=HTMLResponse)
+def daily_summary(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can view the summary")
+
+    today = datetime.now().date()
+
+    sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
+
+    def parse_date(s):
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            return None
+
+    # today's sales only
+    today_sales = []
+    for s in sales:
+        d = parse_date(s.get("created_at", ""))
+        if d and d.date() == today:
+            today_sales.append(s)
+
+    # totals
+    total_today = 0.0
+    credit_today = 0.0
+    payment_breakdown = {}
+    cashier_breakdown = {}
+    for s in today_sales:
+        amount = float(s.get("total", 0))
+        total_today += amount
+        credit_today += float(s.get("amount_on_credit", 0))
+        pm = s.get("payment_method", "Cash")
+        payment_breakdown[pm] = payment_breakdown.get(pm, 0) + amount
+        cashier = s.get("cashier_name") or s.get("user_id", "Unknown")
+        cashier_breakdown[cashier] = cashier_breakdown.get(cashier, 0) + amount
+
+    # items sold today
+    if today_sales:
+        sale_ids = [s["id"] for s in today_sales]
+        all_items = supabase.table("sale_items").select("*").execute().data
+        today_items = [it for it in all_items if it.get("sale_id") in sale_ids]
+    else:
+        today_items = []
+
+    # top materials today
+    product_totals = {}
+    for it in today_items:
+        name = it.get("product_name", "Unknown")
+        qty = float(it.get("quantity", 0))
+        rev = float(it.get("line_total", 0))
+        if name not in product_totals:
+            product_totals[name] = {"qty": 0, "revenue": 0}
+        product_totals[name]["qty"] += qty
+        product_totals[name]["revenue"] += rev
+
+    top_today = sorted(product_totals.items(), key=lambda x: x[1]["qty"], reverse=True)[:5]
+    top_rows = "".join(
+        f"<tr><td>{name}</td><td>{data['qty']:.0f}</td><td>GHS {data['revenue']:,.2f}</td></tr>"
+        for name, data in top_today
+    )
+
+    # payment breakdown rows
+    pay_rows = ""
+    for method, amount in sorted(payment_breakdown.items(), key=lambda x: -x[1]):
+        pct = (amount / total_today * 100) if total_today > 0 else 0
+        pay_rows += f"<tr><td>{method}</td><td>GHS {amount:,.2f}</td><td>{pct:.0f}%</td></tr>"
+
+    # cashier breakdown rows
+    cashier_rows = ""
+    for c, amount in sorted(cashier_breakdown.items(), key=lambda x: -x[1]):
+        cashier_rows += f"<tr><td>{c}</td><td>GHS {amount:,.2f}</td></tr>"
+
+    body = f"""
+    <h2>📅 Daily Summary — {today.strftime('%A, %d %B %Y')}</h2>
+
+    <div class="card" style="background:#dbeafe;border-left:6px solid #1e40af;">
+        <div class="big-num">GHS {total_today:,.2f}</div>
+        <div style="text-align:center;color:#666;font-size:16px;">Total Sales Today</div>
+    </div>
+
+    <div class="grid">
+        <div class="card stat"><div class="num">{len(today_sales)}</div><div class="label">Sales Made</div></div>
+        <div class="card stat"><div class="num">{len(today_items)}</div><div class="label">Items Sold</div></div>
+    </div>
+
+    <div class="grid">
+        <div class="card stat"><div class="num" style="color:#dc2626;">GHS {credit_today:,.2f}</div><div class="label">On Credit Today</div></div>
+        <div class="card stat"><div class="num" style="color:#16a34a;">GHS {total_today - credit_today:,.2f}</div><div class="label">Cash/Paid Today</div></div>
+    </div>
+
+    <div class="card">
+        <h3>💳 Payment Breakdown</h3>
+        <div class="table-wrap">
+        <table>
+            <tr><th>Method</th><th>Amount</th><th>%</th></tr>
+            {pay_rows if pay_rows else "<tr><td colspan='3'>No sales today yet.</td></tr>"}
+        </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>🏆 Top Materials Today</h3>
+        <div class="table-wrap">
+        <table>
+            <tr><th>Material</th><th>Qty Sold</th><th>Revenue</th></tr>
+            {top_rows if top_rows else "<tr><td colspan='3'>No materials sold today.</td></tr>"}
+        </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>👤 Sales by Cashier</h3>
+        <div class="table-wrap">
+        <table>
+            <tr><th>Cashier</th><th>Amount</th></tr>
+            {cashier_rows if cashier_rows else "<tr><td colspan='2'>No sales today yet.</td></tr>"}
+        </table>
+        </div>
+    </div>
+
+    <div class="card" style="text-align:center;">
+        <button onclick="window.print()" class="btn btn-success">🖨️ Print Summary</button>
+        <a href="/" class="btn">Dashboard</a>
+        <a href="/reports" class="btn">Full Reports</a>
+    </div>
+
+    <style>
+    @media print {{
+        .header, .btn, button {{ display: none !important; }}
+        body {{ background: white; }}
+        .card {{ box-shadow: none; border: 1px solid #ddd; }}
+    }}
+    </style>
+    """
+    return HTMLResponse(content=page("Daily Summary", body, username, info.get("role")))
 
 
 # ============ CART & SALES ============
