@@ -39,7 +39,7 @@ def page(title, body, user=None, role=None):
                 "<a href='/add'>Add</a>"
                 "<a href='/sell'>New Sale</a>"
                 "<a href='/cart'>Cart</a>"
-                "<a href='/categories'>Categories</a>"
+                "<a href='/alerts'>🚨 Alerts</a>"
                 "<a href='/reports'>Reports</a>"
                 "<a href='/users'>Users</a>")
     elif user and role == "cashier":
@@ -65,28 +65,23 @@ def page(title, body, user=None, role=None):
 <style>
 * {{ box-sizing: border-box; }}
 body {{ font-family: Arial, sans-serif; margin: 0; background: #f4f4f7; color: #222; }}
-
 .header {{ background: #1e40af; color: white; padding: 15px 20px; }}
 .header-top {{ display: flex; justify-content: space-between; align-items: center; }}
 .header h1 {{ margin: 0; font-size: 20px; }}
 .menu-toggle {{ display: none; background: transparent; border: 2px solid white; color: white; font-size: 22px; padding: 5px 12px; border-radius: 5px; cursor: pointer; }}
-.menu-toggle:hover {{ background: rgba(255,255,255,0.15); }}
 .menu-links {{ display: flex; flex-wrap: wrap; align-items: center; margin-top: 8px; }}
 .menu-links a {{ color: white; text-decoration: none; margin-right: 15px; font-size: 14px; padding: 4px 0; }}
 .menu-links a:hover {{ text-decoration: underline; }}
 .user-bar {{ color: white; font-size: 13px; margin-left: auto; }}
 .user-bar a {{ color: white; text-decoration: underline; }}
-
 .container {{ max-width: 1100px; margin: 20px auto; padding: 0 15px; }}
 .card {{ background: white; border-radius: 8px; padding: 20px; margin-bottom: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }}
 h2 {{ color: #1e40af; margin-top: 0; }}
 h3 {{ color: #1e40af; margin-top: 15px; }}
-
 .table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
 table {{ width: 100%; border-collapse: collapse; min-width: 500px; }}
 th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #eee; }}
 th {{ background: #f9fafb; }}
-
 input, select {{ width: 100%; padding: 10px; margin: 5px 0 15px; border: 1px solid #ddd; border-radius: 5px; font-size: 15px; }}
 button, .btn {{ background: #1e40af; color: white; padding: 10px 16px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; margin: 3px 0; }}
 button:hover, .btn:hover {{ background: #1e3a8a; }}
@@ -104,7 +99,7 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .stat .label {{ color: #666; font-size: 13px; }}
 .login-box {{ max-width: 400px; margin: 80px auto; }}
 .cart-total {{ background: #fef3c7; padding: 15px; border-radius: 8px; margin-top: 10px; font-size: 18px; }}
-
+.alert-box {{ background: #fee2e2; border: 2px solid #dc2626; }}
 @media (max-width: 768px) {{
     .menu-toggle {{ display: block; }}
     .menu-links {{ display: none; flex-direction: column; align-items: stretch; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25); }}
@@ -217,8 +212,16 @@ def home(request: Request):
         admin_actions = ("<a href='/add' class='btn'>Add Material</a>"
                          "<a href='/reports' class='btn'>📊 Reports</a>")
 
+    alert_card = ""
+    if low_stock:
+        alert_card = f"""<div class="card alert-box">
+            <h3 style="color:#dc2626;margin-top:0;">🚨 Low Stock Alert</h3>
+            <p><strong>{len(low_stock)}</strong> items need restocking. <a href="/alerts" class="btn btn-small btn-danger">View Alerts</a></p>
+        </div>"""
+
     body = f"""
     <h2>Dashboard</h2>
+    {alert_card}
     <div class="grid">
         <div class="card stat"><div class="num">{total_products}</div><div class="label">Materials</div></div>
         <div class="card stat"><div class="num">GHS {total_value:,.2f}</div><div class="label">Inventory Value</div></div>
@@ -634,7 +637,6 @@ def suppliers_list(request: Request, search: str = ""):
         query = query.ilike("name", f"%{search}%")
     suppliers = query.order("name").execute().data
 
-    # calculate total purchased from each supplier
     purchase_data = supabase.table("purchase_orders").select("*").execute().data
     totals = {}
     counts = {}
@@ -886,7 +888,7 @@ def purchase_new_form(request: Request, supplier_id: str = ""):
             </select>
 
             <label>Amount Paid Now</label>
-            <input type="number" step="0.01" name="amount_paid" value="0" min="0" placeholder="0 = full credit">
+            <input type="number" step="0.01" name="amount_paid" value="0" min="0">
 
             <label>Note (optional)</label>
             <input type="text" name="note">
@@ -938,7 +940,6 @@ async def purchase_new(request: Request):
     amount_paid = float(form.get("amount_paid", 0) or 0)
     note = form.get("note", "")
 
-    # calculate total
     items = []
     total = 0.0
     for i in range(len(product_ids)):
@@ -978,7 +979,6 @@ async def purchase_new(request: Request):
     result = supabase.table("purchase_orders").insert(po_data).execute()
     purchase_id = result.data[0]["id"]
 
-    # save items + increase stock
     for it in items:
         supabase.table("purchase_order_items").insert({
             "purchase_id": purchase_id,
@@ -989,7 +989,6 @@ async def purchase_new(request: Request):
             "line_total": it["line_total"]
         }).execute()
 
-        # increase stock
         p = supabase.table("products").select("*").eq("id", it["product_id"]).single().execute().data
         new_qty = float(p.get("quantity_in_stock", 0)) + it["quantity"]
         supabase.table("products").update({
@@ -997,7 +996,6 @@ async def purchase_new(request: Request):
             "cost_price": it["unit_cost"]
         }).eq("id", it["product_id"]).execute()
 
-        # log movement
         supabase.table("stock_movements").insert({
             "product_id": it["product_id"],
             "movement_type": "IN",
@@ -1051,6 +1049,91 @@ def purchase_view(request: Request, purchase_id: int):
     </div>
     """
     return HTMLResponse(content=page("Purchase", body, username, role))
+
+
+# ============ LOW STOCK ALERTS ============
+
+@app.get("/alerts", response_class=HTMLResponse)
+def alerts_page(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can view alerts")
+
+    products = supabase.table("products").select("*").eq("is_active", True).execute().data
+    low_stock = []
+    out_of_stock = []
+    for p in products:
+        qty = float(p.get("quantity_in_stock", 0))
+        reorder = float(p.get("reorder_level", 0))
+        if qty <= 0:
+            out_of_stock.append(p)
+        elif qty <= reorder:
+            low_stock.append(p)
+
+    low_stock.sort(key=lambda p: float(p.get("quantity_in_stock", 0)))
+
+    out_rows = ""
+    for p in out_of_stock:
+        out_rows += f"""<tr>
+            <td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td>
+            <td>{p.get('unit','')}</td>
+            <td class='low'>0</td>
+            <td>{p.get('reorder_level', 0)}</td>
+            <td><a href='/purchases/new' class='btn btn-success btn-small'>📦 Restock</a></td>
+        </tr>"""
+
+    low_rows = ""
+    for p in low_stock:
+        qty = float(p.get("quantity_in_stock", 0))
+        reorder = float(p.get("reorder_level", 0))
+        low_rows += f"""<tr>
+            <td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td>
+            <td>{p.get('unit','')}</td>
+            <td class='low'>{qty}</td>
+            <td>{reorder}</td>
+            <td><a href='/purchases/new' class='btn btn-success btn-small'>📦 Restock</a></td>
+        </tr>"""
+
+    body = f"""
+    <h2>🚨 Low Stock Alerts</h2>
+
+    <div class="card alert-box">
+        <h3 style="color:#dc2626;margin:0;">⚠️ Summary</h3>
+        <p style="font-size:18px;margin:10px 0 0 0;">
+            <strong>{len(out_of_stock)}</strong> items OUT OF STOCK &nbsp;·&nbsp;
+            <strong>{len(low_stock)}</strong> items running LOW
+        </p>
+    </div>
+
+    <div class="card">
+        <h3 style="color:#dc2626;">❌ Out of Stock ({len(out_of_stock)})</h3>
+        <div class="table-wrap">
+        <table>
+            <tr><th>Material</th><th>Unit</th><th>In Stock</th><th>Reorder At</th><th></th></tr>
+            {out_rows if out_rows else "<tr><td colspan='5'>None. Great!</td></tr>"}
+        </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3 style="color:#d97706;">⚠️ Running Low ({len(low_stock)})</h3>
+        <div class="table-wrap">
+        <table>
+            <tr><th>Material</th><th>Unit</th><th>In Stock</th><th>Reorder At</th><th></th></tr>
+            {low_rows if low_rows else "<tr><td colspan='5'>None. Great!</td></tr>"}
+        </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <a href="/products" class="btn">View All Materials</a>
+        <a href="/" class="btn">Dashboard</a>
+    </div>
+    """
+    return HTMLResponse(content=page("Alerts", body, username, info.get("role")))
 
 
 # ============ CART & SALES ============
@@ -1171,7 +1254,6 @@ def cart_page(request: Request):
                 <option value="">— Walk-in customer —</option>
                 {cust_options}
             </select>
-
             <label>Discount Type</label>
             <select name="discount_type">
                 <option value="none">No Discount</option>
@@ -1180,7 +1262,6 @@ def cart_page(request: Request):
             </select>
             <label>Discount Value (0 if none)</label>
             <input type="number" step="0.01" name="discount_value" value="0" min="0">
-
             <label>Payment Method</label>
             <select name="payment_method">
                 <option value="Cash">💵 Cash</option>
@@ -1189,10 +1270,8 @@ def cart_page(request: Request):
                 <option value="Card">💳 Card</option>
                 <option value="Credit">📝 Credit (Customer Owes)</option>
             </select>
-
             <label>Amount Paid Now (if credit)</label>
             <input type="number" step="0.01" name="amount_paid_now" value="0" min="0">
-
             <br>
             <button type="submit" class="btn btn-success">✅ Complete Sale</button>
             <a href="/sell" class="btn">+ Add More</a>
