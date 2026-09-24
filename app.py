@@ -39,6 +39,7 @@ def page(title, body, user=None, role=None):
                 "<a href='/add'>Add</a>"
                 "<a href='/sell'>New Sale</a>"
                 "<a href='/cart'>Cart</a>"
+                "<a href='/expenses'>💰 Expenses</a>"
                 "<a href='/alerts'>🚨 Alerts</a>"
                 "<a href='/summary'>📅 Daily</a>"
                 "<a href='/reports'>Reports</a>"
@@ -102,6 +103,8 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .cart-total {{ background: #fef3c7; padding: 15px; border-radius: 8px; margin-top: 10px; font-size: 18px; }}
 .alert-box {{ background: #fee2e2; border: 2px solid #dc2626; }}
 .big-num {{ font-size: 42px; font-weight: bold; color: #1e40af; text-align: center; padding: 20px; }}
+.profit-box {{ background: #dcfce7; border-left: 6px solid #16a34a; }}
+.loss-box {{ background: #fee2e2; border-left: 6px solid #dc2626; }}
 @media (max-width: 768px) {{
     .menu-toggle {{ display: block; }}
     .menu-links {{ display: none; flex-direction: column; align-items: stretch; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25); }}
@@ -209,6 +212,18 @@ def home(request: Request):
 
     customers = supabase.table("customers").select("*").eq("is_active", True).execute().data
     total_owed = sum(float(c.get("balance", 0)) for c in customers)
+
+    # month expenses
+    month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    expenses = supabase.table("expenses").select("*").execute().data
+    month_expenses = 0.0
+    for e in expenses:
+        try:
+            d = datetime.fromisoformat(str(e.get("expense_date", "")).replace("Z", "+00:00")).replace(tzinfo=None)
+            if d >= month_start:
+                month_expenses += float(e.get("amount", 0))
+        except Exception:
+            pass
 
     admin_actions = ""
     if role == "admin":
@@ -1055,6 +1070,232 @@ def purchase_view(request: Request, purchase_id: int):
     return HTMLResponse(content=page("Purchase", body, username, role))
 
 
+# ============ EXPENSES ============
+
+@app.get("/expenses", response_class=HTMLResponse)
+def expenses_list(request: Request, month: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+    if role != "admin":
+        raise HTTPException(403, "Only admins can view expenses")
+
+    expenses = supabase.table("expenses").select("*").order("expense_date", desc=True).execute().data
+
+    # current month filter
+    now = datetime.now()
+    if not month:
+        month = now.strftime("%Y-%m")
+
+    filtered = []
+    for e in expenses:
+        d = str(e.get("expense_date", ""))[:7]
+        if d == month:
+            filtered.append(e)
+
+    total_month = sum(float(e.get("amount", 0)) for e in filtered)
+
+    # category breakdown
+    cat_totals = {}
+    for e in filtered:
+        cat = e.get("category_name", "Unknown")
+        cat_totals[cat] = cat_totals.get(cat, 0) + float(e.get("amount", 0))
+
+    rows = ""
+    for e in filtered:
+        rows += f"""<tr>
+            <td>{e.get('expense_date','')}</td>
+            <td>{e.get('category_name','')}</td>
+            <td>GHS {float(e.get('amount',0)):,.2f}</td>
+            <td>{e.get('description','') or ''}</td>
+            <td>{e.get('paid_to','') or ''}</td>
+            <td>{e.get('payment_method','')}</td>
+            <td><a href='/expenses/delete/{e['id']}' class='btn btn-danger btn-small' onclick="return confirm('Delete this expense?')">🗑️</a></td>
+        </tr>"""
+
+    cat_rows = ""
+    for cat, amt in sorted(cat_totals.items(), key=lambda x: -x[1]):
+        pct = (amt / total_month * 100) if total_month > 0 else 0
+        cat_rows += f"<tr><td>{cat}</td><td>GHS {amt:,.2f}</td><td>{pct:.0f}%</td></tr>"
+
+    body = f"""
+    <h2>💰 Expenses</h2>
+    <div class="card">
+        <a href="/expenses/new" class="btn btn-success">➕ Add Expense</a>
+        <a href="/expenses/export?month={month}" class="btn">📥 Export Month to Excel</a>
+    </div>
+    <div class="card">
+        <form method="get" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+            <div style="flex:1;min-width:200px;">
+                <label>Month (YYYY-MM)</label>
+                <input type="text" name="month" value="{month}" placeholder="2026-09">
+            </div>
+            <button type="submit">Filter</button>
+        </form>
+    </div>
+    <div class="card" style="background:#fef3c7;">
+        <h3 style="margin:0;">Total for {month}: <span style="color:#dc2626;">GHS {total_month:,.2f}</span></h3>
+        <p style="margin:5px 0 0 0;">{len(filtered)} expenses recorded</p>
+    </div>
+    <div class="card">
+        <h3>📊 Breakdown by Category</h3>
+        <div class="table-wrap">
+        <table>
+            <tr><th>Category</th><th>Amount</th><th>% of Total</th></tr>
+            {cat_rows if cat_rows else "<tr><td colspan='3'>No expenses this month.</td></tr>"}
+        </table>
+        </div>
+    </div>
+    <div class="card">
+        <h3>📋 All Expenses ({len(filtered)})</h3>
+        <div class="table-wrap">
+        <table>
+            <tr><th>Date</th><th>Category</th><th>Amount</th><th>Description</th><th>Paid To</th><th>Method</th><th></th></tr>
+            {rows if rows else "<tr><td colspan='7'>No expenses this month.</td></tr>"}
+        </table>
+        </div>
+    </div>
+    """
+    return HTMLResponse(content=page("Expenses", body, username, role))
+
+
+@app.get("/expenses/new", response_class=HTMLResponse)
+def expense_new_form(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can add expenses")
+
+    cats = supabase.table("expense_categories").select("*").order("name").execute().data
+    cat_options = "".join(f"<option value='{c['id']}' data-name='{c['name']}'>{c['name']}</option>" for c in cats)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    body = f"""
+    <h2>➕ Add Expense</h2>
+    <div class="card">
+        <form method="post" action="/expenses/new">
+            <label>Date</label>
+            <input type="date" name="expense_date" value="{today}" required>
+
+            <label>Category</label>
+            <select name="category_id" required>
+                <option value="">-- Select category --</option>
+                {cat_options}
+            </select>
+
+            <label>Amount (GHS)</label>
+            <input type="number" step="0.01" name="amount" required min="0.01">
+
+            <label>Description</label>
+            <input type="text" name="description" placeholder="e.g. September rent">
+
+            <label>Paid To</label>
+            <input type="text" name="paid_to" placeholder="e.g. Landlord name">
+
+            <label>Payment Method</label>
+            <select name="payment_method">
+                <option value="Cash">💵 Cash</option>
+                <option value="Mobile Money">📱 Mobile Money</option>
+                <option value="Bank Transfer">🏦 Bank Transfer</option>
+                <option value="Card">💳 Card</option>
+            </select>
+
+            <button type="submit" class="btn btn-success">Save Expense</button>
+            <a href="/expenses" class="btn">Cancel</a>
+        </form>
+    </div>
+    """
+    return HTMLResponse(content=page("Add Expense", body, username, info.get("role")))
+
+
+@app.post("/expenses/new")
+async def expense_new(request: Request, expense_date: str = Form(...), category_id: str = Form(...), amount: float = Form(...), description: str = Form(""), paid_to: str = Form(""), payment_method: str = Form("Cash")):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can add expenses")
+
+    cat = supabase.table("expense_categories").select("*").eq("id", int(category_id)).single().execute().data
+    cat_name = cat["name"] if cat else "Unknown"
+
+    supabase.table("expenses").insert({
+        "expense_date": expense_date,
+        "category_id": int(category_id),
+        "category_name": cat_name,
+        "amount": amount,
+        "description": description or None,
+        "paid_to": paid_to or None,
+        "payment_method": payment_method,
+        "recorded_by": username
+    }).execute()
+
+    return RedirectResponse("/expenses", status_code=303)
+
+
+@app.get("/expenses/delete/{expense_id}")
+def expense_delete(request: Request, expense_id: int):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can delete expenses")
+    supabase.table("expenses").delete().eq("id", expense_id).execute()
+    return RedirectResponse("/expenses", status_code=303)
+
+
+@app.get("/expenses/export")
+def expenses_export(request: Request, month: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can export expenses")
+
+    if not month:
+        month = datetime.now().strftime("%Y-%m")
+
+    all_expenses = supabase.table("expenses").select("*").order("expense_date", desc=True).execute().data
+    expenses = [e for e in all_expenses if str(e.get("expense_date", ""))[:7] == month]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Expenses"
+    headers = ["Date", "Category", "Amount", "Description", "Paid To", "Payment Method", "Recorded By"]
+    style_header(ws, headers)
+    for e in expenses:
+        ws.append([
+            str(e.get("expense_date", "")),
+            e.get("category_name", ""),
+            float(e.get("amount", 0)),
+            e.get("description", "") or "",
+            e.get("paid_to", "") or "",
+            e.get("payment_method", ""),
+            e.get("recorded_by", "") or "",
+        ])
+
+    widths = [15, 15, 12, 30, 20, 15, 15]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=OBOLO_expenses_{month}.xlsx"}
+    )
+
+
 # ============ LOW STOCK ALERTS ============
 
 @app.get("/alerts", response_class=HTMLResponse)
@@ -1103,7 +1344,6 @@ def alerts_page(request: Request):
 
     body = f"""
     <h2>🚨 Low Stock Alerts</h2>
-
     <div class="card alert-box">
         <h3 style="color:#dc2626;margin:0;">⚠️ Summary</h3>
         <p style="font-size:18px;margin:10px 0 0 0;">
@@ -1111,7 +1351,6 @@ def alerts_page(request: Request):
             <strong>{len(low_stock)}</strong> items running LOW
         </p>
     </div>
-
     <div class="card">
         <h3 style="color:#dc2626;">❌ Out of Stock ({len(out_of_stock)})</h3>
         <div class="table-wrap">
@@ -1121,7 +1360,6 @@ def alerts_page(request: Request):
         </table>
         </div>
     </div>
-
     <div class="card">
         <h3 style="color:#d97706;">⚠️ Running Low ({len(low_stock)})</h3>
         <div class="table-wrap">
@@ -1131,7 +1369,6 @@ def alerts_page(request: Request):
         </table>
         </div>
     </div>
-
     <div class="card">
         <a href="/products" class="btn">View All Materials</a>
         <a href="/" class="btn">Dashboard</a>
@@ -1161,14 +1398,12 @@ def daily_summary(request: Request):
         except Exception:
             return None
 
-    # today's sales only
     today_sales = []
     for s in sales:
         d = parse_date(s.get("created_at", ""))
         if d and d.date() == today:
             today_sales.append(s)
 
-    # totals
     total_today = 0.0
     credit_today = 0.0
     payment_breakdown = {}
@@ -1182,7 +1417,6 @@ def daily_summary(request: Request):
         cashier = s.get("cashier_name") or s.get("user_id", "Unknown")
         cashier_breakdown[cashier] = cashier_breakdown.get(cashier, 0) + amount
 
-    # items sold today
     if today_sales:
         sale_ids = [s["id"] for s in today_sales]
         all_items = supabase.table("sale_items").select("*").execute().data
@@ -1190,7 +1424,6 @@ def daily_summary(request: Request):
     else:
         today_items = []
 
-    # top materials today
     product_totals = {}
     for it in today_items:
         name = it.get("product_name", "Unknown")
@@ -1207,13 +1440,11 @@ def daily_summary(request: Request):
         for name, data in top_today
     )
 
-    # payment breakdown rows
     pay_rows = ""
     for method, amount in sorted(payment_breakdown.items(), key=lambda x: -x[1]):
         pct = (amount / total_today * 100) if total_today > 0 else 0
         pay_rows += f"<tr><td>{method}</td><td>GHS {amount:,.2f}</td><td>{pct:.0f}%</td></tr>"
 
-    # cashier breakdown rows
     cashier_rows = ""
     for c, amount in sorted(cashier_breakdown.items(), key=lambda x: -x[1]):
         cashier_rows += f"<tr><td>{c}</td><td>GHS {amount:,.2f}</td></tr>"
@@ -1880,6 +2111,17 @@ def reports(request: Request):
             if d >= month_start:
                 month_total += amount
 
+    # month expenses
+    expenses = supabase.table("expenses").select("*").execute().data
+    month_expenses = 0.0
+    for e in expenses:
+        try:
+            d = datetime.fromisoformat(str(e.get("expense_date", "")).replace("Z", "+00:00")).replace(tzinfo=None)
+            if d >= month_start:
+                month_expenses += float(e.get("amount", 0))
+        except Exception:
+            pass
+
     items = supabase.table("sale_items").select("*").execute().data
     product_stats = {}
     for it in items:
@@ -1902,6 +2144,8 @@ def reports(request: Request):
         cust = s.get("customer_name") or "Walk-in"
         recent_rows += f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>{cust}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>{s.get('cashier_name') or s.get('user_id','')}</td><td><a href='/receipt/{s['id']}' class='btn btn-small'>View</a></td></tr>"
 
+    net_profit = total_all - month_expenses
+
     body = f"""
     <h2>Reports</h2>
 
@@ -1921,9 +2165,15 @@ def reports(request: Request):
         <div class="card stat"><div class="num">GHS {total_all:,.2f}</div><div class="label">All time</div></div>
     </div>
 
-    <div class="card stat" style="text-align:center;">
-        <div class="num" style="color:#dc2626;">GHS {total_credit:,.2f}</div>
-        <div class="label">Total on Credit (unpaid)</div>
+    <div class="grid">
+        <div class="card stat"><div class="num" style="color:#dc2626;">GHS {total_credit:,.2f}</div><div class="label">Total on Credit</div></div>
+        <div class="card stat"><div class="num" style="color:#dc2626;">GHS {month_expenses:,.2f}</div><div class="label">Expenses (30 days)</div></div>
+    </div>
+
+    <div class="card {'profit-box' if net_profit >= 0 else 'loss-box'}">
+        <h3 style="margin:0;">{'💰 Net Profit' if net_profit >= 0 else '⚠️ Net Loss'} (all time)</h3>
+        <div class="big-num" style="color:{'#16a34a' if net_profit >= 0 else '#dc2626'};">GHS {net_profit:,.2f}</div>
+        <p style="text-align:center;color:#666;">Sales − Expenses (approximate)</p>
     </div>
 
     <div class="card">
