@@ -1,8 +1,11 @@
 import os
 import json
 from datetime import datetime, timedelta
+from io import BytesIO
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from auth import (
@@ -835,11 +838,13 @@ def reports(request: Request):
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
     month_start = now - timedelta(days=30)
+
     def parse_date(s):
         try:
             return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
         except Exception:
             return None
+
     today_total = 0.0
     week_total = 0.0
     month_total = 0.0
@@ -855,6 +860,7 @@ def reports(request: Request):
                 week_total += amount
             if d >= month_start:
                 month_total += amount
+
     items = supabase.table("sale_items").select("*").execute().data
     product_stats = {}
     for it in items:
@@ -868,19 +874,31 @@ def reports(request: Request):
         product_stats[name]["qty"] += qty
         product_stats[name]["revenue"] += revenue
         product_stats[name]["profit"] += profit
+
     top = sorted(product_stats.items(), key=lambda x: x[1]["qty"], reverse=True)[:10]
     top_rows = "".join(f"<tr><td>{name}</td><td>{data['qty']:.0f}</td><td>GHS {data['revenue']:,.2f}</td><td>GHS {data['profit']:,.2f}</td></tr>" for name, data in top)
+
     recent_rows = ""
     for s in sales[:20]:
         recent_rows += f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>{s.get('cashier_name') or s.get('user_id','')}</td><td><a href='/receipt/{s['id']}' class='btn btn-small'>View</a></td></tr>"
+
     body = f"""
     <h2>Reports</h2>
+
+    <div class="card">
+        <h3>📥 Export Data to Excel</h3>
+        <a href="/export/sales" class="btn btn-success">📥 All Sales</a>
+        <a href="/export/products" class="btn btn-success" style="margin-left:10px;">📥 All Materials</a>
+        <a href="/export/stock" class="btn btn-success" style="margin-left:10px;">📥 Stock Movements</a>
+    </div>
+
     <div class="grid">
         <div class="card stat"><div class="num">GHS {today_total:,.2f}</div><div class="label">Today</div></div>
         <div class="card stat"><div class="num">GHS {week_total:,.2f}</div><div class="label">Last 7 days</div></div>
         <div class="card stat"><div class="num">GHS {month_total:,.2f}</div><div class="label">Last 30 days</div></div>
         <div class="card stat"><div class="num">GHS {total_all:,.2f}</div><div class="label">All time</div></div>
     </div>
+
     <div class="card">
         <h3>🏆 Top Selling Materials</h3>
         <table>
@@ -888,6 +906,7 @@ def reports(request: Request):
             {top_rows if top_rows else "<tr><td colspan='4'>No sales yet.</td></tr>"}
         </table>
     </div>
+
     <div class="card">
         <h3>🧾 Recent Sales (last 20)</h3>
         <table>
@@ -899,16 +918,7 @@ def reports(request: Request):
     return HTMLResponse(content=page("Reports", body, username, info.get("role")))
 
 
-@app.get("/health")  # ============ EXPORT TO EXCEL ============
-
-from fastapi.responses import StreamingResponse
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from io import BytesIO
-
-
 def style_header(ws, headers):
-    """Apply bold + colored header to a worksheet row 1"""
     for col_num, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_num, value=header)
         cell.font = Font(bold=True, color="FFFFFF")
@@ -917,23 +927,19 @@ def style_header(ws, headers):
 
 
 @app.get("/export/sales")
-def export_sales(request: Request):S
+def export_sales(request: Request):
     username = get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=303)
     info = get_user_info(username)
     if not info or info.get("role") != "admin":
         raise HTTPException(403, "Only admins can export data")
-
     sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
-
     wb = Workbook()
     ws = wb.active
     ws.title = "Sales"
-
     headers = ["Date", "Invoice", "Subtotal", "Discount", "Total", "Payment", "Cashier"]
     style_header(ws, headers)
-
     for s in sales:
         ws.append([
             s.get("created_at", "")[:19].replace("T", " "),
@@ -944,16 +950,12 @@ def export_sales(request: Request):S
             s.get("payment_method", ""),
             s.get("cashier_name") or s.get("user_id", ""),
         ])
-
-    # column widths
     widths = [20, 22, 12, 12, 12, 15, 15]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w
-
     stream = BytesIO()
     wb.save(stream)
     stream.seek(0)
-
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -969,16 +971,12 @@ def export_products(request: Request):
     info = get_user_info(username)
     if not info or info.get("role") != "admin":
         raise HTTPException(403, "Only admins can export data")
-
     products = supabase.table("products").select("*").eq("is_active", True).order("name").execute().data
-
     wb = Workbook()
     ws = wb.active
     ws.title = "Materials"
-
     headers = ["Name", "SKU", "Unit", "Stock", "Cost Price", "Selling Price", "Reorder Level", "Location"]
     style_header(ws, headers)
-
     for p in products:
         ws.append([
             p.get("name", ""),
@@ -990,15 +988,12 @@ def export_products(request: Request):
             float(p.get("reorder_level", 0)),
             p.get("location") or "",
         ])
-
     widths = [30, 15, 10, 10, 12, 14, 14, 15]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w
-
     stream = BytesIO()
     wb.save(stream)
     stream.seek(0)
-
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1014,16 +1009,12 @@ def export_stock(request: Request):
     info = get_user_info(username)
     if not info or info.get("role") != "admin":
         raise HTTPException(403, "Only admins can export data")
-
     movements = supabase.table("stock_movements").select("*").order("created_at", desc=True).limit(5000).execute().data
-
     wb = Workbook()
     ws = wb.active
     ws.title = "Stock Movements"
-
     headers = ["Date", "Type", "Quantity", "Note"]
     style_header(ws, headers)
-
     for m in movements:
         ws.append([
             m.get("created_at", "")[:19].replace("T", " "),
@@ -1031,15 +1022,12 @@ def export_stock(request: Request):
             float(m.get("quantity", 0)),
             m.get("note", ""),
         ])
-
     widths = [20, 12, 12, 50]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w
-
     stream = BytesIO()
     wb.save(stream)
     stream.seek(0)
-
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1047,5 +1035,6 @@ def export_stock(request: Request):
     )
 
 
+@app.get("/health")
 def health():
     return {"status": "ok"}
