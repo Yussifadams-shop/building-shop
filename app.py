@@ -35,6 +35,7 @@ def page(title, body, user=None, role=None):
         menu = ("<a href='/'>Home</a>"
                 "<a href='/products'>Materials</a>"
                 "<a href='/customers'>Customers</a>"
+                "<a href='/suppliers'>Suppliers</a>"
                 "<a href='/add'>Add</a>"
                 "<a href='/sell'>New Sale</a>"
                 "<a href='/cart'>Cart</a>"
@@ -45,6 +46,7 @@ def page(title, body, user=None, role=None):
         menu = ("<a href='/'>Home</a>"
                 "<a href='/products'>Materials</a>"
                 "<a href='/customers'>Customers</a>"
+                "<a href='/suppliers'>Suppliers</a>"
                 "<a href='/sell'>New Sale</a>"
                 "<a href='/cart'>Cart</a>")
     else:
@@ -103,7 +105,6 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .login-box {{ max-width: 400px; margin: 80px auto; }}
 .cart-total {{ background: #fef3c7; padding: 15px; border-radius: 8px; margin-top: 10px; font-size: 18px; }}
 
-/* ---------- MOBILE ---------- */
 @media (max-width: 768px) {{
     .menu-toggle {{ display: block; }}
     .menu-links {{ display: none; flex-direction: column; align-items: stretch; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25); }}
@@ -236,6 +237,7 @@ def home(request: Request):
         <a href="/sell" class="btn btn-success">New Sale</a>
         <a href="/cart" class="btn">🛒 Cart</a>
         <a href="/customers" class="btn">👥 Customers</a>
+        <a href="/suppliers" class="btn">🚚 Suppliers</a>
     </div>
     """
     return HTMLResponse(content=page("Dashboard", body, username, role))
@@ -613,6 +615,444 @@ async def customer_pay(request: Request, customer_id: int, amount: float = Form(
     return RedirectResponse(f"/customers/view/{customer_id}", status_code=303)
 
 
+# ============ SUPPLIERS ============
+
+@app.get("/suppliers", response_class=HTMLResponse)
+def suppliers_list(request: Request, search: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+
+    query = supabase.table("suppliers").select("*")
+    try:
+        query = query.eq("is_active", True)
+    except Exception:
+        pass
+    if search:
+        query = query.ilike("name", f"%{search}%")
+    suppliers = query.order("name").execute().data
+
+    # calculate total purchased from each supplier
+    purchase_data = supabase.table("purchase_orders").select("*").execute().data
+    totals = {}
+    counts = {}
+    for po in purchase_data:
+        sid = po.get("supplier_id")
+        totals[sid] = totals.get(sid, 0) + float(po.get("total", 0))
+        counts[sid] = counts.get(sid, 0) + 1
+
+    rows = ""
+    for s in suppliers:
+        spent = totals.get(s["id"], 0)
+        num_orders = counts.get(s["id"], 0)
+        rows += f"""<tr>
+            <td><strong>{s['name']}</strong><br><small>{s.get('phone','')}</small></td>
+            <td>{s.get('address','') or ''}</td>
+            <td>{num_orders} orders</td>
+            <td>GHS {spent:,.2f}</td>
+            <td>
+                <a href='/suppliers/view/{s['id']}' class='btn btn-small'>👁️ View</a>
+                <a href='/purchases/new?supplier_id={s['id']}' class='btn btn-success btn-small'>📦 Restock</a>
+            </td>
+        </tr>"""
+
+    body = f"""
+    <h2>🚚 Suppliers</h2>
+    <div class="card">
+        <a href="/suppliers/add" class="btn btn-success">➕ Add Supplier</a>
+        <a href="/purchases" class="btn">📦 All Purchases</a>
+    </div>
+    <div class="card">
+        <form method="get" style="display:flex;gap:10px;flex-wrap:wrap;">
+            <input type="text" name="search" placeholder="Search suppliers..." value="{search}" style="flex:1;min-width:200px;">
+            <button type="submit">Search</button>
+        </form>
+    </div>
+    <div class="card">
+        <div class="table-wrap">
+        <table>
+            <tr><th>Supplier</th><th>Address</th><th>Orders</th><th>Total Spent</th><th>Actions</th></tr>
+            {rows if rows else "<tr><td colspan='5'>No suppliers yet. Add one to start tracking purchases.</td></tr>"}
+        </table>
+        </div>
+    </div>
+    """
+    return HTMLResponse(content=page("Suppliers", body, username, role))
+
+
+@app.get("/suppliers/add", response_class=HTMLResponse)
+def supplier_add_form(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can add suppliers")
+    body = """
+    <h2>➕ Add New Supplier</h2>
+    <div class="card">
+        <form method="post" action="/suppliers/add">
+            <label>Supplier Name</label>
+            <input type="text" name="name" required placeholder="e.g. Dangote Cement Depot">
+            <label>Phone Number</label>
+            <input type="text" name="phone" placeholder="e.g. 0244123456">
+            <label>Email (optional)</label>
+            <input type="text" name="email">
+            <label>Address</label>
+            <input type="text" name="address" placeholder="e.g. Accra">
+            <label>Notes (optional)</label>
+            <input type="text" name="notes">
+            <button type="submit" class="btn btn-success">Create Supplier</button>
+            <a href="/suppliers" class="btn">Cancel</a>
+        </form>
+    </div>
+    """
+    return HTMLResponse(content=page("Add Supplier", body, username, info.get("role")))
+
+
+@app.post("/suppliers/add")
+async def supplier_add(request: Request, name: str = Form(...), phone: str = Form(""), email: str = Form(""), address: str = Form(""), notes: str = Form("")):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can add suppliers")
+    supabase.table("suppliers").insert({
+        "name": name,
+        "phone": phone or None,
+        "email": email or None,
+        "address": address or None,
+        "notes": notes or None,
+        "is_active": True
+    }).execute()
+    return RedirectResponse("/suppliers", status_code=303)
+
+
+@app.get("/suppliers/view/{supplier_id}", response_class=HTMLResponse)
+def supplier_view(request: Request, supplier_id: int):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+
+    s = supabase.table("suppliers").select("*").eq("id", supplier_id).single().execute().data
+    purchases = supabase.table("purchase_orders").select("*").eq("supplier_id", supplier_id).order("created_at", desc=True).execute().data
+
+    rows = ""
+    total_spent = 0
+    for po in purchases:
+        total_spent += float(po.get("total", 0))
+        rows += f"""<tr>
+            <td>{po.get('created_at','')[:16]}</td>
+            <td>{po.get('po_number','')}</td>
+            <td>GHS {float(po.get('total',0)):,.2f}</td>
+            <td>{po.get('payment_method','')}</td>
+            <td><a href='/purchases/view/{po['id']}' class='btn btn-small'>View</a></td>
+        </tr>"""
+
+    body = f"""
+    <h2>🚚 {s['name']}</h2>
+    <div class="card">
+        <p><strong>Phone:</strong> {s.get('phone','') or '—'}</p>
+        <p><strong>Email:</strong> {s.get('email','') or '—'}</p>
+        <p><strong>Address:</strong> {s.get('address','') or '—'}</p>
+        <p><strong>Notes:</strong> {s.get('notes','') or '—'}</p>
+        <h3>Total Purchased: <span style="color:#dc2626;">GHS {total_spent:,.2f}</span></h3>
+        <a href="/purchases/new?supplier_id={supplier_id}" class="btn btn-success">📦 Record New Purchase</a>
+    </div>
+    <div class="card">
+        <h3>📋 Purchase History ({len(purchases)})</h3>
+        <div class="table-wrap">
+        <table>
+            <tr><th>Date</th><th>PO Number</th><th>Total</th><th>Payment</th><th></th></tr>
+            {rows if rows else "<tr><td colspan='5'>No purchases yet.</td></tr>"}
+        </table>
+        </div>
+    </div>
+    <div class="card">
+        <a href="/suppliers" class="btn">← Back to Suppliers</a>
+    </div>
+    """
+    return HTMLResponse(content=page("Supplier", body, username, role))
+
+
+# ============ PURCHASES ============
+
+@app.get("/purchases", response_class=HTMLResponse)
+def purchases_list(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+
+    purchases = supabase.table("purchase_orders").select("*").order("created_at", desc=True).limit(100).execute().data
+    rows = ""
+    total_all = 0
+    for po in purchases:
+        total_all += float(po.get("total", 0))
+        rows += f"""<tr>
+            <td>{po.get('created_at','')[:16]}</td>
+            <td>{po.get('po_number','')}</td>
+            <td>{po.get('supplier_name','')}</td>
+            <td>GHS {float(po.get('total',0)):,.2f}</td>
+            <td>{po.get('payment_method','')}</td>
+            <td><a href='/purchases/view/{po['id']}' class='btn btn-small'>View</a></td>
+        </tr>"""
+
+    body = f"""
+    <h2>📦 Purchase Orders</h2>
+    <div class="card">
+        <a href="/purchases/new" class="btn btn-success">➕ Record New Purchase</a>
+        <a href="/suppliers" class="btn">🚚 Suppliers</a>
+    </div>
+    <div class="card">
+        <h3>Total Spent: <span style="color:#dc2626;">GHS {total_all:,.2f}</span> ({len(purchases)} orders)</h3>
+    </div>
+    <div class="card">
+        <div class="table-wrap">
+        <table>
+            <tr><th>Date</th><th>PO Number</th><th>Supplier</th><th>Total</th><th>Payment</th><th></th></tr>
+            {rows if rows else "<tr><td colspan='6'>No purchases yet.</td></tr>"}
+        </table>
+        </div>
+    </div>
+    """
+    return HTMLResponse(content=page("Purchases", body, username, role))
+
+
+@app.get("/purchases/new", response_class=HTMLResponse)
+def purchase_new_form(request: Request, supplier_id: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can record purchases")
+
+    suppliers = supabase.table("suppliers").select("*").order("name").execute().data
+    sup_options = "".join(
+        f"<option value='{s['id']}' {'selected' if str(s['id'])==str(supplier_id) else ''}>{s['name']}</option>"
+        for s in suppliers
+    )
+
+    products = supabase.table("products").select("*").eq("is_active", True).order("name").execute().data
+    prod_options = "".join(
+        f"<option value='{p['id']}' data-cost='{p.get('cost_price',0)}'>{p['name']} ({p.get('unit','')})</option>"
+        for p in products
+    )
+
+    body = f"""
+    <h2>📦 Record New Purchase</h2>
+    <div class="card">
+        <form method="post" action="/purchases/new">
+            <label>Supplier</label>
+            <select name="supplier_id" required>
+                <option value="">-- Select supplier --</option>
+                {sup_options}
+            </select>
+
+            <h3>Items Purchased</h3>
+            <p style="color:#666;font-size:14px;">Add each item you bought. Stock will be updated automatically.</p>
+
+            <div id="items-container">
+                <div class="item-row" style="border:1px solid #ddd;padding:15px;border-radius:8px;margin-bottom:10px;">
+                    <label>Material</label>
+                    <select name="product_id[]" required>
+                        <option value="">-- Select material --</option>
+                        {prod_options}
+                    </select>
+                    <label>Quantity</label>
+                    <input type="number" step="0.01" name="quantity[]" required min="0.01">
+                    <label>Unit Cost (GHS)</label>
+                    <input type="number" step="0.01" name="unit_cost[]" required min="0.01">
+                </div>
+            </div>
+
+            <button type="button" onclick="addItem()" class="btn">➕ Add Another Item</button>
+
+            <h3 style="margin-top:20px;">Payment</h3>
+            <label>Payment Method</label>
+            <select name="payment_method">
+                <option value="Cash">💵 Cash</option>
+                <option value="Mobile Money">📱 Mobile Money</option>
+                <option value="Bank Transfer">🏦 Bank Transfer</option>
+                <option value="Card">💳 Card</option>
+                <option value="Credit">📝 Credit (I Owe Supplier)</option>
+            </select>
+
+            <label>Amount Paid Now</label>
+            <input type="number" step="0.01" name="amount_paid" value="0" min="0" placeholder="0 = full credit">
+
+            <label>Note (optional)</label>
+            <input type="text" name="note">
+
+            <button type="submit" class="btn btn-success">✅ Save Purchase</button>
+            <a href="/purchases" class="btn">Cancel</a>
+        </form>
+    </div>
+
+    <script>
+    function addItem() {{
+        var container = document.getElementById('items-container');
+        var firstRow = container.querySelector('.item-row');
+        var newRow = firstRow.cloneNode(true);
+        newRow.querySelectorAll('input').forEach(function(inp) {{ inp.value = ''; }});
+        newRow.querySelectorAll('select').forEach(function(sel) {{ sel.selectedIndex = 0; }});
+        container.appendChild(newRow);
+    }}
+    </script>
+    """
+    return HTMLResponse(content=page("New Purchase", body, username, info.get("role")))
+
+
+@app.post("/purchases/new")
+async def purchase_new(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can record purchases")
+
+    form = await request.form()
+    supplier_id = form.get("supplier_id")
+    if not supplier_id:
+        raise HTTPException(400, "Supplier is required")
+
+    supplier = supabase.table("suppliers").select("*").eq("id", int(supplier_id)).single().execute().data
+    supplier_name = supplier["name"] if supplier else "Unknown"
+
+    product_ids = form.getlist("product_id[]")
+    quantities = form.getlist("quantity[]")
+    unit_costs = form.getlist("unit_cost[]")
+
+    if not product_ids or len(product_ids) != len(quantities):
+        raise HTTPException(400, "Invalid items")
+
+    payment_method = form.get("payment_method", "Cash")
+    amount_paid = float(form.get("amount_paid", 0) or 0)
+    note = form.get("note", "")
+
+    # calculate total
+    items = []
+    total = 0.0
+    for i in range(len(product_ids)):
+        if not product_ids[i]:
+            continue
+        pid = int(product_ids[i])
+        qty = float(quantities[i])
+        cost = float(unit_costs[i])
+        line = qty * cost
+        total += line
+
+        product = supabase.table("products").select("*").eq("id", pid).single().execute().data
+        items.append({"product_id": pid, "product_name": product["name"], "quantity": qty, "unit_cost": cost, "line_total": line})
+
+    if not items:
+        raise HTTPException(400, "At least one item required")
+
+    credit_amount = 0.0
+    if payment_method == "Credit":
+        credit_amount = total - amount_paid
+        if credit_amount < 0:
+            credit_amount = 0
+
+    po_number = f"PO-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    po_data = {
+        "po_number": po_number,
+        "supplier_id": int(supplier_id),
+        "supplier_name": supplier_name,
+        "total": total,
+        "amount_paid": amount_paid if payment_method == "Credit" else total,
+        "amount_owed": credit_amount,
+        "payment_method": payment_method,
+        "status": "received",
+        "note": note or None,
+        "recorded_by": username
+    }
+    result = supabase.table("purchase_orders").insert(po_data).execute()
+    purchase_id = result.data[0]["id"]
+
+    # save items + increase stock
+    for it in items:
+        supabase.table("purchase_order_items").insert({
+            "purchase_id": purchase_id,
+            "product_id": it["product_id"],
+            "product_name": it["product_name"],
+            "quantity": it["quantity"],
+            "unit_cost": it["unit_cost"],
+            "line_total": it["line_total"]
+        }).execute()
+
+        # increase stock
+        p = supabase.table("products").select("*").eq("id", it["product_id"]).single().execute().data
+        new_qty = float(p.get("quantity_in_stock", 0)) + it["quantity"]
+        supabase.table("products").update({
+            "quantity_in_stock": new_qty,
+            "cost_price": it["unit_cost"]
+        }).eq("id", it["product_id"]).execute()
+
+        # log movement
+        supabase.table("stock_movements").insert({
+            "product_id": it["product_id"],
+            "movement_type": "IN",
+            "quantity": it["quantity"],
+            "unit_cost": it["unit_cost"],
+            "reference": po_number,
+            "note": f"Purchase from {supplier_name} — {it['product_name']} x {it['quantity']}"
+        }).execute()
+
+    return RedirectResponse(f"/purchases/view/{purchase_id}", status_code=303)
+
+
+@app.get("/purchases/view/{purchase_id}", response_class=HTMLResponse)
+def purchase_view(request: Request, purchase_id: int):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+
+    po = supabase.table("purchase_orders").select("*").eq("id", purchase_id).single().execute().data
+    items = supabase.table("purchase_order_items").select("*").eq("purchase_id", purchase_id).execute().data
+
+    rows = ""
+    for it in items:
+        rows += f"<tr><td>{it['product_name']}</td><td>{it['quantity']}</td><td>GHS {float(it['unit_cost']):,.2f}</td><td>GHS {float(it['line_total']):,.2f}</td></tr>"
+
+    body = f"""
+    <div class="card">
+        <h2>📦 Purchase Order {po['po_number']}</h2>
+        <p><strong>Supplier:</strong> {po.get('supplier_name','')}</p>
+        <p><strong>Date:</strong> {po.get('created_at','')[:16]}</p>
+        <p><strong>Recorded by:</strong> {po.get('recorded_by','')}</p>
+        <hr>
+        <div class="table-wrap">
+        <table>
+            <tr><th>Item</th><th>Qty</th><th>Unit Cost</th><th>Total</th></tr>
+            {rows}
+        </table>
+        </div>
+        <hr>
+        <h3 style="text-align:right;">Total: GHS {float(po['total']):,.2f}</h3>
+        <p style="text-align:right;">Paid: GHS {float(po.get('amount_paid', 0)):,.2f}</p>
+        {f'<p style="text-align:right;color:#dc2626;">Owed: GHS {float(po.get("amount_owed", 0)):,.2f}</p>' if float(po.get("amount_owed", 0)) > 0 else ''}
+        <p style="text-align:right;">Payment: {po.get('payment_method','')}</p>
+        {f'<p><strong>Note:</strong> {po.get("note","")}</p>' if po.get("note") else ''}
+    </div>
+    <div class="card">
+        <a href="/purchases" class="btn">← Back to Purchases</a>
+        <a href="/suppliers/view/{po['supplier_id']}" class="btn">View Supplier</a>
+    </div>
+    """
+    return HTMLResponse(content=page("Purchase", body, username, role))
+
+
 # ============ CART & SALES ============
 
 @app.get("/sell", response_class=HTMLResponse)
@@ -751,7 +1191,7 @@ def cart_page(request: Request):
             </select>
 
             <label>Amount Paid Now (if credit)</label>
-            <input type="number" step="0.01" name="amount_paid_now" value="0" min="0" placeholder="0 = full credit">
+            <input type="number" step="0.01" name="amount_paid_now" value="0" min="0">
 
             <br>
             <button type="submit" class="btn btn-success">✅ Complete Sale</button>
@@ -1245,6 +1685,7 @@ def reports(request: Request):
         <a href="/export/products" class="btn btn-success">📥 All Materials</a>
         <a href="/export/stock" class="btn btn-success">📥 Stock Movements</a>
         <a href="/export/customers" class="btn btn-success">📥 Customers</a>
+        <a href="/export/purchases" class="btn btn-success">📥 Purchases</a>
     </div>
 
     <div class="grid">
@@ -1436,6 +1877,43 @@ def export_customers(request: Request):
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=OBOLO_customers_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
+    )
+
+
+@app.get("/export/purchases")
+def export_purchases(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can export data")
+    purchases = supabase.table("purchase_orders").select("*").order("created_at", desc=True).execute().data
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Purchases"
+    headers = ["Date", "PO Number", "Supplier", "Total", "Paid", "Owed", "Payment Method"]
+    style_header(ws, headers)
+    for po in purchases:
+        ws.append([
+            po.get("created_at", "")[:19].replace("T", " "),
+            po.get("po_number", ""),
+            po.get("supplier_name", ""),
+            float(po.get("total", 0)),
+            float(po.get("amount_paid", 0)),
+            float(po.get("amount_owed", 0)),
+            po.get("payment_method", ""),
+        ])
+    widths = [20, 22, 25, 12, 12, 12, 18]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=OBOLO_purchases_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
     )
 
 
