@@ -84,7 +84,9 @@ h3 {{ color: #1e40af; margin-top: 15px; }}
 table {{ width: 100%; border-collapse: collapse; min-width: 500px; }}
 th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #eee; }}
 th {{ background: #f9fafb; }}
-input, select {{ width: 100%; padding: 10px; margin: 5px 0 15px; border: 1px solid #ddd; border-radius: 5px; font-size: 15px; }}
+input {{ width: 100%; padding: 8px 10px; margin: 4px 0 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; background: white; }}
+select {{ width: 100%; padding: 6px 8px; margin: 4px 0 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; background: white; line-height: 1.2; }}
+label {{ font-size: 14px; color: #333; font-weight: bold; }}
 button, .btn {{ background: #1e40af; color: white; padding: 10px 16px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; margin: 3px 0; }}
 button:hover, .btn:hover {{ background: #1e3a8a; }}
 .btn-success {{ background: #16a34a; }}
@@ -212,18 +214,6 @@ def home(request: Request):
 
     customers = supabase.table("customers").select("*").eq("is_active", True).execute().data
     total_owed = sum(float(c.get("balance", 0)) for c in customers)
-
-    # month expenses
-    month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    expenses = supabase.table("expenses").select("*").execute().data
-    month_expenses = 0.0
-    for e in expenses:
-        try:
-            d = datetime.fromisoformat(str(e.get("expense_date", "")).replace("Z", "+00:00")).replace(tzinfo=None)
-            if d >= month_start:
-                month_expenses += float(e.get("amount", 0))
-        except Exception:
-            pass
 
     admin_actions = ""
     if role == "admin":
@@ -1084,7 +1074,6 @@ def expenses_list(request: Request, month: str = ""):
 
     expenses = supabase.table("expenses").select("*").order("expense_date", desc=True).execute().data
 
-    # current month filter
     now = datetime.now()
     if not month:
         month = now.strftime("%Y-%m")
@@ -1097,7 +1086,6 @@ def expenses_list(request: Request, month: str = ""):
 
     total_month = sum(float(e.get("amount", 0)) for e in filtered)
 
-    # category breakdown
     cat_totals = {}
     for e in filtered:
         cat = e.get("category_name", "Unknown")
@@ -2111,7 +2099,6 @@ def reports(request: Request):
             if d >= month_start:
                 month_total += amount
 
-    # month expenses
     expenses = supabase.table("expenses").select("*").execute().data
     month_expenses = 0.0
     for e in expenses:
