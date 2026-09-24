@@ -34,15 +34,15 @@ def page(title, body, user=None, role=None):
     if user and role == "admin":
         menu = ("<a href='/'>Home</a>"
                 "<a href='/products'>Materials</a>"
-                "<a href='/add'>Add</a>"
+                "<a href='/customers'>Customers</a>"
                 "<a href='/sell'>New Sale</a>"
                 "<a href='/cart'>Cart</a>"
-                "<a href='/categories'>Categories</a>"
                 "<a href='/reports'>Reports</a>"
                 "<a href='/users'>Users</a>")
     elif user and role == "cashier":
         menu = ("<a href='/'>Home</a>"
                 "<a href='/products'>Materials</a>"
+                "<a href='/customers'>Customers</a>"
                 "<a href='/sell'>New Sale</a>"
                 "<a href='/cart'>Cart</a>")
     else:
@@ -80,6 +80,8 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .btn-small {{ padding: 6px 12px; font-size: 13px; }}
 .low {{ color: #dc2626; font-weight: bold; }}
 .ok {{ color: #16a34a; font-weight: bold; }}
+.owed {{ color: #dc2626; font-weight: bold; font-size: 16px; }}
+.clear {{ color: #16a34a; font-weight: bold; }}
 .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
 @media (max-width: 600px) {{ .grid {{ grid-template-columns: 1fr; }} }}
 .stat {{ text-align: center; padding: 15px; }}
@@ -101,6 +103,8 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 </body>
 </html>"""
 
+
+# ============ AUTH ============
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(error: str = ""):
@@ -154,6 +158,8 @@ def save_cart(cart):
     return response
 
 
+# ============ DASHBOARD ============
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     username = get_current_user(request)
@@ -168,6 +174,9 @@ def home(request: Request):
     low_stock = [p for p in products if float(p.get("quantity_in_stock", 0)) <= float(p.get("reorder_level", 0))]
     low_rows = "".join(f"<tr><td>{p['name']}</td><td class='low'>{p['quantity_in_stock']} {p['unit']}</td></tr>" for p in low_stock)
 
+    customers = supabase.table("customers").select("*").eq("is_active", True).execute().data
+    total_owed = sum(float(c.get("balance", 0)) for c in customers)
+
     admin_actions = ""
     if role == "admin":
         admin_actions = ("<a href='/add' class='btn'>Add Material</a>"
@@ -179,6 +188,10 @@ def home(request: Request):
         <div class="card stat"><div class="num">{total_products}</div><div class="label">Materials</div></div>
         <div class="card stat"><div class="num">GHS {total_value:,.2f}</div><div class="label">Inventory Value</div></div>
     </div>
+    <div class="grid">
+        <div class="card stat"><div class="num">{len(customers)}</div><div class="label">Customers</div></div>
+        <div class="card stat"><div class="num" style="color:#dc2626;">GHS {total_owed:,.2f}</div><div class="label">Total Owed by Customers</div></div>
+    </div>
     <div class="card">
         <h2>Low Stock ({len(low_stock)})</h2>
         {f"<table><tr><th>Material</th><th>In Stock</th></tr>{low_rows}</table>" if low_stock else "<p>All good!</p>"}
@@ -188,10 +201,13 @@ def home(request: Request):
         <a href="/products" class="btn">View All</a>
         <a href="/sell" class="btn btn-success">New Sale</a>
         <a href="/cart" class="btn">🛒 Cart</a>
+        <a href="/customers" class="btn">👥 Customers</a>
     </div>
     """
     return HTMLResponse(content=page("Dashboard", body, username, role))
 
+
+# ============ PRODUCTS ============
 
 @app.get("/products", response_class=HTMLResponse)
 def products_list(request: Request, search: str = ""):
@@ -351,6 +367,219 @@ def delete_product(request: Request, product_id: int):
     return RedirectResponse("/products", status_code=303)
 
 
+# ============ CUSTOMERS ============
+
+@app.get("/customers", response_class=HTMLResponse)
+def customers_list(request: Request, search: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+
+    query = supabase.table("customers").select("*").eq("is_active", True)
+    if search:
+        query = query.ilike("name", f"%{search}%")
+    customers = query.order("name").execute().data
+
+    rows = ""
+    for c in customers:
+        balance = float(c.get("balance", 0))
+        balance_class = "owed" if balance > 0 else "clear"
+        rows += f"""<tr>
+            <td><strong>{c['name']}</strong><br><small>{c.get('phone','')}</small></td>
+            <td>{c.get('address','') or ''}</td>
+            <td class='{balance_class}'>GHS {balance:,.2f}</td>
+            <td>
+                <a href='/customers/view/{c['id']}' class='btn btn-small'>👁️ View</a>
+                <a href='/customers/pay/{c['id']}' class='btn btn-success btn-small'>💰 Pay</a>
+            </td>
+        </tr>"""
+
+    total_owed = sum(float(c.get("balance", 0)) for c in customers)
+
+    body = f"""
+    <h2>👥 Customers</h2>
+    <div class="card">
+        <h3>Total Owed by All Customers: <span style="color:#dc2626;">GHS {total_owed:,.2f}</span></h3>
+    </div>
+    <div class="card">
+        <a href="/customers/add" class="btn btn-success">➕ Add Customer</a>
+    </div>
+    <div class="card">
+        <form method="get" style="display:flex;gap:10px;">
+            <input type="text" name="search" placeholder="Search by name..." value="{search}">
+            <button>Search</button>
+        </form>
+    </div>
+    <div class="card">
+        <table>
+            <tr><th>Customer</th><th>Address</th><th>Balance Owed</th><th>Actions</th></tr>
+            {rows if rows else "<tr><td colspan='4'>No customers yet. Add one to start tracking credit.</td></tr>"}
+        </table>
+    </div>
+    """
+    return HTMLResponse(content=page("Customers", body, username, role))
+
+
+@app.get("/customers/add", response_class=HTMLResponse)
+def customer_add_form(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+    body = """
+    <h2>➕ Add New Customer</h2>
+    <div class="card">
+        <form method="post" action="/customers/add">
+            <label>Full Name</label>
+            <input type="text" name="name" required>
+            <label>Phone Number</label>
+            <input type="text" name="phone" placeholder="e.g. 0244123456">
+            <label>Address / Location</label>
+            <input type="text" name="address" placeholder="e.g. Menzezor">
+            <label>Notes (optional)</label>
+            <input type="text" name="notes" placeholder="e.g. Buys cement regularly">
+            <button type="submit" class="btn btn-success">Create Customer</button>
+            <a href="/customers" class="btn">Cancel</a>
+        </form>
+    </div>
+    """
+    return HTMLResponse(content=page("Add Customer", body, username, role))
+
+
+@app.post("/customers/add")
+async def customer_add(request: Request, name: str = Form(...), phone: str = Form(""), address: str = Form(""), notes: str = Form("")):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    supabase.table("customers").insert({
+        "name": name,
+        "phone": phone or None,
+        "address": address or None,
+        "notes": notes or None,
+        "balance": 0,
+        "is_active": True
+    }).execute()
+    return RedirectResponse("/customers", status_code=303)
+
+
+@app.get("/customers/view/{customer_id}", response_class=HTMLResponse)
+def customer_view(request: Request, customer_id: int):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+
+    c = supabase.table("customers").select("*").eq("id", customer_id).single().execute().data
+    balance = float(c.get("balance", 0))
+
+    # sales history for this customer
+    sales = supabase.table("sales").select("*").eq("customer_id", customer_id).order("created_at", desc=True).execute().data
+    sales_rows = ""
+    for s in sales:
+        sales_rows += f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>GHS {float(s.get('amount_paid_now',0)):,.2f}</td><td>GHS {float(s.get('amount_on_credit',0)):,.2f}</td></tr>"
+
+    # payments history
+    payments = supabase.table("customer_payments").select("*").eq("customer_id", customer_id).order("created_at", desc=True).execute().data
+    pay_rows = ""
+    for p in payments:
+        pay_rows += f"<tr><td>{p.get('created_at','')[:16]}</td><td>GHS {float(p.get('amount',0)):,.2f}</td><td>{p.get('payment_method','')}</td><td>{p.get('note','') or ''}</td></tr>"
+
+    body = f"""
+    <h2>👤 {c['name']}</h2>
+    <div class="card">
+        <p><strong>Phone:</strong> {c.get('phone','') or '—'}</p>
+        <p><strong>Address:</strong> {c.get('address','') or '—'}</p>
+        <p><strong>Notes:</strong> {c.get('notes','') or '—'}</p>
+        <h3>Current Balance: <span class="{'owed' if balance > 0 else 'clear'}">GHS {balance:,.2f}</span></h3>
+        <a href="/customers/pay/{customer_id}" class="btn btn-success">💰 Record Payment</a>
+    </div>
+
+    <div class="card">
+        <h3>📋 Purchase History</h3>
+        <table>
+            <tr><th>Date</th><th>Invoice</th><th>Total</th><th>Paid</th><th>Credit</th></tr>
+            {sales_rows if sales_rows else "<tr><td colspan='5'>No purchases yet.</td></tr>"}
+        </table>
+    </div>
+
+    <div class="card">
+        <h3>💵 Payment History</h3>
+        <table>
+            <tr><th>Date</th><th>Amount</th><th>Method</th><th>Note</th></tr>
+            {pay_rows if pay_rows else "<tr><td colspan='4'>No payments yet.</td></tr>"}
+        </table>
+    </div>
+
+    <div class="card">
+        <a href="/customers" class="btn">← Back to Customers</a>
+    </div>
+    """
+    return HTMLResponse(content=page("Customer", body, username, role))
+
+
+@app.get("/customers/pay/{customer_id}", response_class=HTMLResponse)
+def customer_pay_form(request: Request, customer_id: int):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+    c = supabase.table("customers").select("*").eq("id", customer_id).single().execute().data
+    balance = float(c.get("balance", 0))
+    body = f"""
+    <h2>💰 Record Payment from {c['name']}</h2>
+    <div class="card">
+        <p>Current balance: <strong class="owed">GHS {balance:,.2f}</strong></p>
+        <form method="post" action="/customers/pay/{customer_id}">
+            <label>Amount Paid (GHS)</label>
+            <input type="number" step="0.01" name="amount" required min="0.01" max="{balance}">
+            <label>Payment Method</label>
+            <select name="payment_method">
+                <option value="Cash">💵 Cash</option>
+                <option value="Mobile Money">📱 Mobile Money</option>
+                <option value="Bank Transfer">🏦 Bank Transfer</option>
+                <option value="Card">💳 Card</option>
+            </select>
+            <label>Note (optional)</label>
+            <input type="text" name="note" placeholder="e.g. Part payment">
+            <button type="submit" class="btn btn-success">Record Payment</button>
+            <a href="/customers/view/{customer_id}" class="btn">Cancel</a>
+        </form>
+    </div>
+    """
+    return HTMLResponse(content=page("Record Payment", body, username, role))
+
+
+@app.post("/customers/pay/{customer_id}")
+async def customer_pay(request: Request, customer_id: int, amount: float = Form(...), payment_method: str = Form("Cash"), note: str = Form("")):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+
+    c = supabase.table("customers").select("*").eq("id", customer_id).single().execute().data
+    balance = float(c.get("balance", 0))
+    if amount > balance:
+        amount = balance
+    new_balance = balance - amount
+
+    supabase.table("customers").update({"balance": new_balance}).eq("id", customer_id).execute()
+    supabase.table("customer_payments").insert({
+        "customer_id": customer_id,
+        "amount": amount,
+        "payment_method": payment_method,
+        "note": note or None,
+        "recorded_by": username
+    }).execute()
+
+    return RedirectResponse(f"/customers/view/{customer_id}", status_code=303)
+
+
+# ============ CART & SALES ============
+
 @app.get("/sell", response_class=HTMLResponse)
 def sell_page(request: Request):
     username = get_current_user(request)
@@ -444,6 +673,11 @@ def cart_page(request: Request):
                 </form>
             </td>
         </tr>"""
+
+    # fetch customers for dropdown
+    customers = supabase.table("customers").select("*").eq("is_active", True).order("name").execute().data
+    cust_options = "".join(f"<option value='{c['id']}'>{c['name']} — {c.get('phone','') or ''}</option>" for c in customers)
+
     body = f"""
     <h2>🛒 Your Cart</h2>
     <div class="card">
@@ -454,6 +688,12 @@ def cart_page(request: Request):
         <div class="cart-total"><strong>Subtotal: GHS {total:,.2f}</strong></div>
         <br>
         <form method="post" action="/cart/checkout">
+            <label>Customer (leave blank for walk-in)</label>
+            <select name="customer_id">
+                <option value="">— Walk-in customer —</option>
+                {cust_options}
+            </select>
+
             <label>Discount Type</label>
             <select name="discount_type">
                 <option value="none">No Discount</option>
@@ -462,13 +702,19 @@ def cart_page(request: Request):
             </select>
             <label>Discount Value (0 if none)</label>
             <input type="number" step="0.01" name="discount_value" value="0" min="0">
+
             <label>Payment Method</label>
             <select name="payment_method">
                 <option value="Cash">💵 Cash</option>
                 <option value="Mobile Money">📱 Mobile Money</option>
                 <option value="Bank Transfer">🏦 Bank Transfer</option>
                 <option value="Card">💳 Card</option>
+                <option value="Credit">📝 Credit (Customer Owes)</option>
             </select>
+
+            <label>Amount Paid Now (if credit)</label>
+            <input type="number" step="0.01" name="amount_paid_now" value="0" min="0" placeholder="0 = full credit">
+
             <br>
             <button type="submit" class="btn btn-success">✅ Complete Sale</button>
             <a href="/sell" class="btn">+ Add More</a>
@@ -497,7 +743,14 @@ def cart_clear(request: Request):
 
 
 @app.post("/cart/checkout")
-async def cart_checkout(request: Request, discount_type: str = Form("none"), discount_value: float = Form(0), payment_method: str = Form("Cash")):
+async def cart_checkout(
+    request: Request,
+    customer_id: str = Form(""),
+    discount_type: str = Form("none"),
+    discount_value: float = Form(0),
+    payment_method: str = Form("Cash"),
+    amount_paid_now: float = Form(0)
+):
     username = get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=303)
@@ -513,11 +766,13 @@ async def cart_checkout(request: Request, discount_type: str = Form("none"), dis
             continue
         if float(p["quantity_in_stock"]) < item["quantity"]:
             raise HTTPException(400, f"Not enough stock for {p['name']}")
+
     invoice_no = f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     subtotal = 0.0
     for item in cart:
         p = product_map[item["product_id"]]
         subtotal += float(p["selling_price"]) * item["quantity"]
+
     discount_amount = 0.0
     if discount_type == "percent":
         discount_amount = subtotal * (discount_value / 100)
@@ -526,9 +781,43 @@ async def cart_checkout(request: Request, discount_type: str = Form("none"), dis
     if discount_amount > subtotal:
         discount_amount = subtotal
     final_total = subtotal - discount_amount
-    sale_data = {"invoice_no": invoice_no, "subtotal": subtotal, "discount": discount_amount, "total": final_total, "payment_method": payment_method, "amount_paid": final_total, "status": "completed", "user_id": username, "cashier_name": username}
+
+    customer_name = None
+    cust_obj = None
+    if customer_id:
+        try:
+            cust_obj = supabase.table("customers").select("*").eq("id", int(customer_id)).single().execute().data
+            customer_name = cust_obj["name"] if cust_obj else None
+        except Exception:
+            cust_obj = None
+
+    # determine credit
+    credit_amount = 0.0
+    if payment_method == "Credit" and cust_obj:
+        credit_amount = final_total - amount_paid_now
+        if credit_amount < 0:
+            credit_amount = 0
+    elif payment_method == "Credit" and not cust_obj:
+        raise HTTPException(400, "Credit sales require a registered customer")
+
+    sale_data = {
+        "invoice_no": invoice_no,
+        "customer_id": int(customer_id) if customer_id else None,
+        "customer_name": customer_name,
+        "subtotal": subtotal,
+        "discount": discount_amount,
+        "total": final_total,
+        "payment_method": payment_method,
+        "amount_paid": final_total - credit_amount if payment_method == "Credit" else final_total,
+        "amount_paid_now": amount_paid_now if payment_method == "Credit" else final_total,
+        "amount_on_credit": credit_amount,
+        "status": "completed",
+        "user_id": username,
+        "cashier_name": username
+    }
     sale_result = supabase.table("sales").insert(sale_data).execute()
     sale_id = sale_result.data[0]["id"]
+
     for item in cart:
         p = product_map[item["product_id"]]
         qty = item["quantity"]
@@ -539,10 +828,18 @@ async def cart_checkout(request: Request, discount_type: str = Form("none"), dis
         new_qty = float(p["quantity_in_stock"]) - qty
         supabase.table("products").update({"quantity_in_stock": new_qty}).eq("id", p["id"]).execute()
         supabase.table("stock_movements").insert({"product_id": p["id"], "movement_type": "OUT", "quantity": qty, "note": f"{invoice_no} — {p['name']} x {qty} — {username}"}).execute()
+
+    # add credit to customer balance
+    if credit_amount > 0 and cust_obj:
+        new_balance = float(cust_obj.get("balance", 0)) + credit_amount
+        supabase.table("customers").update({"balance": new_balance}).eq("id", cust_obj["id"]).execute()
+
     response = RedirectResponse(f"/receipt/{sale_id}", status_code=303)
     response.delete_cookie("cart")
     return response
 
+
+# ============ RECEIPT ============
 
 @app.get("/receipt/{sale_id}", response_class=HTMLResponse)
 def receipt(request: Request, sale_id: int):
@@ -556,6 +853,15 @@ def receipt(request: Request, sale_id: int):
     rows = ""
     for it in items:
         rows += f"<tr><td>{it['product_name']}</td><td>{it['quantity']}</td><td>GHS {float(it['unit_price']):,.2f}</td><td>GHS {float(it['line_total']):,.2f}</td></tr>"
+
+    customer_line = ""
+    if sale.get("customer_name"):
+        customer_line = f"<p><strong>Customer:</strong> {sale['customer_name']}</p>"
+
+    credit_line = ""
+    if float(sale.get("amount_on_credit", 0)) > 0:
+        credit_line = f'<p style="text-align:right;color:#dc2626;">On Credit: GHS {float(sale.get("amount_on_credit", 0)):,.2f}</p>'
+
     body = f"""
     <div class="card" id="receipt">
         <h2 style="text-align:center;">🏗️ {SHOP_NAME}</h2>
@@ -565,6 +871,7 @@ def receipt(request: Request, sale_id: int):
         <p><strong>Invoice:</strong> {sale['invoice_no']}</p>
         <p><strong>Date:</strong> {sale['created_at'][:16]}</p>
         <p><strong>Cashier:</strong> {sale.get('cashier_name') or sale.get('user_id','')}</p>
+        {customer_line}
         <hr>
         <table>
             <tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr>
@@ -575,6 +882,7 @@ def receipt(request: Request, sale_id: int):
         {f'<p style="text-align:right;">Discount: -GHS {float(sale.get("discount", 0)):,.2f}</p>' if float(sale.get("discount", 0)) > 0 else ''}
         <h3 style="text-align:right;">Total: GHS {float(sale['total']):,.2f}</h3>
         <p style="text-align:right;">Payment: {sale.get('payment_method','Cash')}</p>
+        {credit_line}
         <hr>
         <p style="text-align:center;">Thank you for your business!</p>
     </div>
@@ -593,6 +901,8 @@ def receipt(request: Request, sale_id: int):
     """
     return HTMLResponse(content=page("Receipt", body, username, role))
 
+
+# ============ CATEGORIES ============
 
 @app.get("/categories", response_class=HTMLResponse)
 def categories_list(request: Request):
@@ -673,6 +983,8 @@ def category_delete(request: Request, category_id: int):
     return RedirectResponse("/categories", status_code=303)
 
 
+# ============ USERS ============
+
 @app.get("/users", response_class=HTMLResponse)
 def users_list(request: Request):
     username = get_current_user(request)
@@ -706,11 +1018,6 @@ def users_list(request: Request):
             {rows}
         </table>
     </div>
-    <div class="card">
-        <h3>ℹ️ Role Permissions</h3>
-        <p><strong>Admin</strong> — Full access: add/edit/delete materials, manage categories, view reports, manage users.</p>
-        <p><strong>Cashier</strong> — Limited: can view materials, make sales, use the cart. Cannot add/edit/delete materials, cannot see reports or users.</p>
-    </div>
     """
     return HTMLResponse(content=page("Users", body, username, info.get("role")))
 
@@ -732,7 +1039,7 @@ def users_add_form(request: Request):
             <label>Password</label>
             <input type="text" name="password" required minlength="4">
             <label>Full Name</label>
-            <input type="text" name="full_name" placeholder="e.g. Kofi Mensah">
+            <input type="text" name="full_name">
             <label>Role</label>
             <select name="role" required>
                 <option value="cashier">Cashier (limited access)</option>
@@ -825,6 +1132,8 @@ def users_delete(request: Request, user_id: int):
     return RedirectResponse("/users", status_code=303)
 
 
+# ============ REPORTS ============
+
 @app.get("/reports", response_class=HTMLResponse)
 def reports(request: Request):
     username = get_current_user(request)
@@ -849,9 +1158,11 @@ def reports(request: Request):
     week_total = 0.0
     month_total = 0.0
     total_all = 0.0
+    total_credit = 0.0
     for s in sales:
         amount = float(s.get("total", 0))
         total_all += amount
+        total_credit += float(s.get("amount_on_credit", 0))
         d = parse_date(s.get("created_at", ""))
         if d:
             if d >= today_start:
@@ -880,7 +1191,8 @@ def reports(request: Request):
 
     recent_rows = ""
     for s in sales[:20]:
-        recent_rows += f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>{s.get('cashier_name') or s.get('user_id','')}</td><td><a href='/receipt/{s['id']}' class='btn btn-small'>View</a></td></tr>"
+        cust = s.get("customer_name") or "Walk-in"
+        recent_rows += f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>{cust}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>{s.get('cashier_name') or s.get('user_id','')}</td><td><a href='/receipt/{s['id']}' class='btn btn-small'>View</a></td></tr>"
 
     body = f"""
     <h2>Reports</h2>
@@ -890,6 +1202,7 @@ def reports(request: Request):
         <a href="/export/sales" class="btn btn-success">📥 All Sales</a>
         <a href="/export/products" class="btn btn-success" style="margin-left:10px;">📥 All Materials</a>
         <a href="/export/stock" class="btn btn-success" style="margin-left:10px;">📥 Stock Movements</a>
+        <a href="/export/customers" class="btn btn-success" style="margin-left:10px;">📥 Customers</a>
     </div>
 
     <div class="grid">
@@ -897,6 +1210,11 @@ def reports(request: Request):
         <div class="card stat"><div class="num">GHS {week_total:,.2f}</div><div class="label">Last 7 days</div></div>
         <div class="card stat"><div class="num">GHS {month_total:,.2f}</div><div class="label">Last 30 days</div></div>
         <div class="card stat"><div class="num">GHS {total_all:,.2f}</div><div class="label">All time</div></div>
+    </div>
+
+    <div class="card stat" style="text-align:center;">
+        <div class="num" style="color:#dc2626;">GHS {total_credit:,.2f}</div>
+        <div class="label">Total on Credit (unpaid)</div>
     </div>
 
     <div class="card">
@@ -910,13 +1228,15 @@ def reports(request: Request):
     <div class="card">
         <h3>🧾 Recent Sales (last 20)</h3>
         <table>
-            <tr><th>Date</th><th>Invoice</th><th>Total</th><th>Cashier</th><th></th></tr>
-            {recent_rows if recent_rows else "<tr><td colspan='5'>No sales yet.</td></tr>"}
+            <tr><th>Date</th><th>Invoice</th><th>Customer</th><th>Total</th><th>Cashier</th><th></th></tr>
+            {recent_rows if recent_rows else "<tr><td colspan='6'>No sales yet.</td></tr>"}
         </table>
     </div>
     """
     return HTMLResponse(content=page("Reports", body, username, info.get("role")))
 
+
+# ============ EXCEL EXPORTS ============
 
 def style_header(ws, headers):
     for col_num, header in enumerate(headers, 1):
@@ -938,19 +1258,22 @@ def export_sales(request: Request):
     wb = Workbook()
     ws = wb.active
     ws.title = "Sales"
-    headers = ["Date", "Invoice", "Subtotal", "Discount", "Total", "Payment", "Cashier"]
+    headers = ["Date", "Invoice", "Customer", "Subtotal", "Discount", "Total", "Paid", "On Credit", "Payment", "Cashier"]
     style_header(ws, headers)
     for s in sales:
         ws.append([
             s.get("created_at", "")[:19].replace("T", " "),
             s.get("invoice_no", ""),
+            s.get("customer_name") or "Walk-in",
             float(s.get("subtotal", 0)),
             float(s.get("discount", 0)),
             float(s.get("total", 0)),
+            float(s.get("amount_paid_now", s.get("total", 0))),
+            float(s.get("amount_on_credit", 0)),
             s.get("payment_method", ""),
             s.get("cashier_name") or s.get("user_id", ""),
         ])
-    widths = [20, 22, 12, 12, 12, 15, 15]
+    widths = [20, 22, 20, 12, 12, 12, 12, 12, 15, 15]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w
     stream = BytesIO()
@@ -1032,6 +1355,41 @@ def export_stock(request: Request):
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=OBOLO_stock_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
+    )
+
+
+@app.get("/export/customers")
+def export_customers(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can export data")
+    customers = supabase.table("customers").select("*").eq("is_active", True).order("name").execute().data
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Customers"
+    headers = ["Name", "Phone", "Address", "Balance Owed", "Notes"]
+    style_header(ws, headers)
+    for c in customers:
+        ws.append([
+            c.get("name", ""),
+            c.get("phone", "") or "",
+            c.get("address", "") or "",
+            float(c.get("balance", 0)),
+            c.get("notes", "") or "",
+        ])
+    widths = [25, 15, 25, 15, 30]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=OBOLO_customers_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
     )
 
 
