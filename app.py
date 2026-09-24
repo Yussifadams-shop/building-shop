@@ -43,14 +43,16 @@ def page(title, body, user=None, role=None):
                 "<a href='/alerts'>🚨 Alerts</a>"
                 "<a href='/summary'>📅 Daily</a>"
                 "<a href='/reports'>Reports</a>"
-                "<a href='/users'>Users</a>")
+                "<a href='/users'>Users</a>"
+                "<a href='/account'>👤 My Account</a>")
     elif user and role == "cashier":
         menu = ("<a href='/'>Home</a>"
                 "<a href='/products'>Materials</a>"
                 "<a href='/customers'>Customers</a>"
                 "<a href='/suppliers'>Suppliers</a>"
                 "<a href='/sell'>New Sale</a>"
-                "<a href='/cart'>Cart</a>")
+                "<a href='/cart'>Cart</a>"
+                "<a href='/account'>👤 My Account</a>")
     else:
         menu = ""
 
@@ -107,6 +109,8 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .big-num {{ font-size: 42px; font-weight: bold; color: #1e40af; text-align: center; padding: 20px; }}
 .profit-box {{ background: #dcfce7; border-left: 6px solid #16a34a; }}
 .loss-box {{ background: #fee2e2; border-left: 6px solid #dc2626; }}
+.success-msg {{ background: #dcfce7; border: 2px solid #16a34a; color: #166534; padding: 15px; border-radius: 8px; margin-bottom: 15px; }}
+.error-msg {{ background: #fee2e2; border: 2px solid #dc2626; color: #991b1b; padding: 15px; border-radius: 8px; margin-bottom: 15px; }}
 @media (max-width: 768px) {{
     .menu-toggle {{ display: block; }}
     .menu-links {{ display: none; flex-direction: column; align-items: stretch; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25); }}
@@ -178,6 +182,92 @@ async def do_login(username: str = Form(...), password: str = Form(...)):
 @app.get("/logout")
 def logout():
     response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(COOKIE_NAME)
+    return response
+
+
+# ============ MY ACCOUNT ============
+
+@app.get("/account", response_class=HTMLResponse)
+def my_account(request: Request, msg: str = "", error: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+
+    success_box = f'<div class="success-msg">✅ {msg}</div>' if msg else ""
+    error_box = f'<div class="error-msg">❌ {error}</div>' if error else ""
+
+    body = f"""
+    <h2>👤 My Account</h2>
+    {success_box}
+    {error_box}
+
+    <div class="card">
+        <h3>Account Information</h3>
+        <p><strong>Username:</strong> {username}</p>
+        <p><strong>Full Name:</strong> {info.get('full_name','—') if info else '—'}</p>
+        <p><strong>Role:</strong> {'Admin' if role == 'admin' else 'Cashier'}</p>
+        <p><strong>Status:</strong> {'✅ Active' if info and info.get('is_active') else '❌ Inactive'}</p>
+    </div>
+
+    <div class="card">
+        <h3>🔐 Change Password</h3>
+        <form method="post" action="/account/change-password">
+            <label>Current Password</label>
+            <input type="password" name="current_password" required autocomplete="current-password">
+
+            <label>New Password (min 4 characters)</label>
+            <input type="password" name="new_password" required minlength="4" autocomplete="new-password">
+
+            <label>Confirm New Password</label>
+            <input type="password" name="confirm_password" required minlength="4" autocomplete="new-password">
+
+            <button type="submit" class="btn btn-success">🔐 Change Password</button>
+            <a href="/" class="btn">Cancel</a>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3>ℹ️ Tips</h3>
+        <ul>
+            <li>Choose a password that is hard for others to guess</li>
+            <li>Don't use your name, phone number, or birthday</li>
+            <li>After changing your password, you'll be logged out and must log in again with the new password</li>
+            <li>If you forget your password, ask the admin to reset it from the Users page</li>
+        </ul>
+    </div>
+    """
+    return HTMLResponse(content=page("My Account", body, username, role))
+
+
+@app.post("/account/change-password")
+async def change_password(request: Request, current_password: str = Form(...), new_password: str = Form(...), confirm_password: str = Form(...)):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+
+    # Validate new passwords match
+    if new_password != confirm_password:
+        return RedirectResponse("/account?error=New+passwords+do+not+match", status_code=303)
+
+    if len(new_password) < 4:
+        return RedirectResponse("/account?error=New+password+must+be+at+least+4+characters", status_code=303)
+
+    if new_password == current_password:
+        return RedirectResponse("/account?error=New+password+must+be+different+from+current", status_code=303)
+
+    # Verify current password
+    user_check = verify_login(username, current_password)
+    if not user_check:
+        return RedirectResponse("/account?error=Current+password+is+incorrect", status_code=303)
+
+    # Update password
+    supabase.table("shop_users").update({"password": new_password}).eq("username", username).execute()
+
+    # Log the user out
+    response = RedirectResponse("/login?error=Password+changed+successfully.+Please+log+in+again", status_code=303)
     response.delete_cookie(COOKIE_NAME)
     return response
 
