@@ -30,7 +30,7 @@ SHOP_PHONE = "053500108"
 SHOP_ADDRESS = "MENZEZOR, GHANA"
 
 
-def page(title, body, user=None, role=None):
+def page(title, body, user=None, role=None, extra_head=""):
     if user and role == "admin":
         menu = ("<a href='/'>Home</a>"
                 "<a href='/products'>Materials</a>"
@@ -69,6 +69,7 @@ def page(title, body, user=None, role=None):
 <head>
 <title>{title} - {SHOP_NAME}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{extra_head}
 <style>
 * {{ box-sizing: border-box; }}
 body {{ font-family: Arial, sans-serif; margin: 0; background: #f4f4f7; color: #222; }}
@@ -147,6 +148,10 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .badge-warning {{ background: #fef3c7; color: #92400e; }}
 .badge-danger {{ background: #fee2e2; color: #991b1b; }}
 
+/* Chart container */
+.chart-container {{ position: relative; height: 300px; margin-top: 10px; }}
+@media (max-width: 768px) {{ .chart-container {{ height: 250px; }} }}
+
 @media (max-width: 768px) {{
     .menu-toggle {{ display: block; }}
     .menu-links {{ display: none; flex-direction: column; align-items: stretch; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25); }}
@@ -196,7 +201,6 @@ def parse_dt(s):
 
 
 def log(username, action_type, description, severity="info", details=None):
-    """Convenience wrapper for logging."""
     log_activity(username, action_type, description, severity, details)
 
 
@@ -254,10 +258,8 @@ def activity_page(request: Request, user_filter: str = "", type_filter: str = ""
     if not info or info.get("role") != "admin":
         raise HTTPException(403, "Only admins can view activity log")
 
-    # Fetch logs (latest 500)
     logs = supabase.table("activity_log").select("*").order("created_at", desc=True).limit(500).execute().data
 
-    # Apply filters
     filtered = []
     for lg in logs:
         if user_filter and lg.get("username") != user_filter:
@@ -280,11 +282,9 @@ def activity_page(request: Request, user_filter: str = "", type_filter: str = ""
                 continue
         filtered.append(lg)
 
-    # Get unique users and types for filter dropdowns
     all_users = sorted(set(lg.get("username", "") for lg in logs if lg.get("username")))
     all_types = sorted(set(lg.get("action_type", "") for lg in logs if lg.get("action_type")))
 
-    # Stats
     total_logs = len(logs)
     failed_logins = len([lg for lg in logs if lg.get("action_type") == "login_failed"])
     deletions = len([lg for lg in logs if lg.get("action_type") in ["material_delete", "expense_delete"]])
@@ -523,7 +523,7 @@ def save_cart(cart):
     return response
 
 
-# ============ DASHBOARD ============
+# ============ DASHBOARD (with charts) ============
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
@@ -541,6 +541,178 @@ def home(request: Request):
 
     customers = supabase.table("customers").select("*").eq("is_active", True).execute().data
     total_owed = sum(float(c.get("balance", 0)) for c in customers)
+
+    # CHART DATA (admin only)
+    chart_section = ""
+    charts_script = ""
+    if role == "admin":
+        all_sales = supabase.table("sales").select("*").execute().data
+        all_items = supabase.table("sale_items").select("*").execute().data
+
+        # Last 30 days daily sales
+        today = datetime.now().date()
+        days_30 = [(today - timedelta(days=i)) for i in range(29, -1, -1)]
+        daily_labels = [d.strftime('%d/%m') for d in days_30]
+        daily_totals = []
+        for d in days_30:
+            total = 0.0
+            for s in all_sales:
+                sd = parse_dt(s.get("created_at", ""))
+                if sd and sd.date() == d:
+                    total += float(s.get("total", 0))
+            daily_totals.append(round(total, 2))
+
+        # Top 10 materials by revenue
+        material_rev = {}
+        for it in all_items:
+            name = it.get("product_name", "Unknown")
+            rev = float(it.get("line_total", 0))
+            material_rev[name] = material_rev.get(name, 0) + rev
+        top_items = sorted(material_rev.items(), key=lambda x: -x[1])[:10]
+        top_labels = [t[0] for t in top_items]
+        top_values = [round(t[1], 2) for t in top_items]
+
+        # Payment method breakdown
+        payment_totals = {}
+        for s in all_sales:
+            pm = s.get("payment_method", "Cash")
+            payment_totals[pm] = payment_totals.get(pm, 0) + float(s.get("total", 0))
+        payment_labels = list(payment_totals.keys())
+        payment_values = [round(v, 2) for v in payment_totals.values()]
+
+        # Monthly sales (last 6 months)
+        month_labels = []
+        month_totals = []
+        for i in range(5, -1, -1):
+            m = today.month - i
+            y = today.year
+            while m <= 0:
+                m += 12
+                y -= 1
+            month_label = datetime(y, m, 1).strftime('%b %Y')
+            month_labels.append(month_label)
+            total = 0.0
+            for s in all_sales:
+                sd = parse_dt(s.get("created_at", ""))
+                if sd and sd.year == y and sd.month == m:
+                    total += float(s.get("total", 0))
+            month_totals.append(round(total, 2))
+
+        chart_section = f"""
+        <div class="grid">
+            <div class="card">
+                <h3>📈 Daily Sales — Last 30 Days</h3>
+                <div class="chart-container"><canvas id="dailyChart"></canvas></div>
+            </div>
+            <div class="card">
+                <h3>🥧 Payment Methods (All Time)</h3>
+                <div class="chart-container"><canvas id="paymentChart"></canvas></div>
+            </div>
+        </div>
+        <div class="grid">
+            <div class="card">
+                <h3>📊 Top 10 Materials by Revenue</h3>
+                <div class="chart-container"><canvas id="topChart"></canvas></div>
+            </div>
+            <div class="card">
+                <h3>📉 Monthly Sales — Last 6 Months</h3>
+                <div class="chart-container"><canvas id="monthlyChart"></canvas></div>
+            </div>
+        </div>
+        """
+
+        charts_script = f"""
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <script>
+        var dailyLabels = {json.dumps(daily_labels)};
+        var dailyData = {json.dumps(daily_totals)};
+        var topLabels = {json.dumps(top_labels)};
+        var topData = {json.dumps(top_values)};
+        var payLabels = {json.dumps(payment_labels)};
+        var payData = {json.dumps(payment_values)};
+        var monLabels = {json.dumps(month_labels)};
+        var monData = {json.dumps(month_totals)};
+
+        // Daily chart
+        new Chart(document.getElementById('dailyChart'), {{
+            type: 'line',
+            data: {{
+                labels: dailyLabels,
+                datasets: [{{
+                    label: 'Sales (GHS)',
+                    data: dailyData,
+                    borderColor: '#1e40af',
+                    backgroundColor: 'rgba(30,64,175,0.1)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 2
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{ legend: {{ display: false }} }},
+                scales: {{ y: {{ beginAtZero: true }} }}
+            }}
+        }});
+
+        // Payment pie chart
+        new Chart(document.getElementById('paymentChart'), {{
+            type: 'doughnut',
+            data: {{
+                labels: payLabels,
+                datasets: [{{
+                    data: payData,
+                    backgroundColor: ['#1e40af','#16a34a','#d97706','#dc2626','#7c3aed','#0891b2']
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{ legend: {{ position: 'bottom' }} }}
+            }}
+        }});
+
+        // Top materials bar chart
+        new Chart(document.getElementById('topChart'), {{
+            type: 'bar',
+            data: {{
+                labels: topLabels,
+                datasets: [{{
+                    label: 'Revenue (GHS)',
+                    data: topData,
+                    backgroundColor: '#1e40af'
+                }}]
+            }},
+            options: {{
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{ legend: {{ display: false }} }},
+                scales: {{ x: {{ beginAtZero: true }} }}
+            }}
+        }});
+
+        // Monthly chart
+        new Chart(document.getElementById('monthlyChart'), {{
+            type: 'bar',
+            data: {{
+                labels: monLabels,
+                datasets: [{{
+                    label: 'Sales (GHS)',
+                    data: monData,
+                    backgroundColor: '#16a34a'
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{ legend: {{ display: false }} }},
+                scales: {{ y: {{ beginAtZero: true }} }}
+            }}
+        }});
+        </script>
+        """
 
     admin_actions = ""
     if role == "admin":
@@ -566,6 +738,7 @@ def home(request: Request):
         <div class="card stat"><div class="num">{len(customers)}</div><div class="label">Customers</div></div>
         <div class="card stat"><div class="num" style="color:#dc2626;">GHS {total_owed:,.2f}</div><div class="label">Total Owed</div></div>
     </div>
+    {chart_section}
     <div class="card">
         <h2>Low Stock ({len(low_stock)})</h2>
         {f"<div class='table-wrap'><table><tr><th>Material</th><th>In Stock</th></tr>{low_rows}</table></div>" if low_stock else "<p>All good!</p>"}
@@ -578,6 +751,7 @@ def home(request: Request):
         <a href="/customers" class="btn">👥 Customers</a>
         <a href="/suppliers" class="btn">🚚 Suppliers</a>
     </div>
+    {charts_script}
     """
     return HTMLResponse(content=page("Dashboard", body, username, role))
 
@@ -730,7 +904,6 @@ async def edit_product(request: Request, product_id: int, name: str = Form(...),
     data = {"name": name, "sku": sku, "category_id": int(category_id), "unit": unit, "location": location or None, "cost_price": cost_price, "selling_price": selling_price, "quantity_in_stock": quantity_in_stock, "reorder_level": reorder_level}
     supabase.table("products").update(data).eq("id", product_id).execute()
 
-    # Log price changes
     if abs(selling_price - old_price) > 0.001:
         log(username, "price_change",
             f"Changed SELLING price of '{name}' from GHS {old_price:,.2f} to GHS {selling_price:,.2f}",
