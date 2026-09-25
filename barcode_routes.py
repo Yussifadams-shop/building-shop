@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Request, Form, HTTPException
+from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
-from auth import get_current_user, get_user_info, log_activity
+from auth import get_current_user, get_user_info
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
@@ -14,20 +14,17 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 router = APIRouter()
 
 
-def page(title, body, user=None, role=None, extra_head=""):
-    """Shared page wrapper — imports the parent page function dynamically."""
-    from app import page as parent_page
-    return parent_page(title, body, user, role, extra_head)
-
-
 @router.get("/scan", response_class=HTMLResponse)
 def scan_page(request: Request, code: str = ""):
+    from app import page
+
     username = get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=303)
     info = get_user_info(username)
     role = info.get("role", "cashier") if info else "cashier"
 
+    # Lookup result
     result_html = ""
     if code:
         products = supabase.table("products").select("*").eq("is_active", True).eq("barcode", code).execute().data
@@ -50,7 +47,8 @@ def scan_page(request: Request, code: str = ""):
         else:
             result_html = f"""
             <div class="scan-result scan-error">
-                <p style="margin:0;">❌ No material found with barcode: <strong>{code}</strong></p>
+                <p style="margin:0;">❌ No material found with code: <strong>{code}</strong></p>
+                <p style="margin:10px 0 0 0;font-size:14px;">Check that this code matches a product's <strong>SKU</strong> or <strong>Barcode</strong> field.</p>
             </div>
             """
 
@@ -58,9 +56,11 @@ def scan_page(request: Request, code: str = ""):
     <h2>📷 Barcode Scanner</h2>
 
     <div class="card">
-        <p style="text-align:center;color:#666;">Point your camera at a barcode to scan. Works best in bright light.</p>
-        <div id="reader"></div>
-        <div id="status" style="text-align:center;margin-top:10px;color:#666;">Starting camera...</div>
+        <p style="text-align:center;color:#666;">Hold the barcode steady inside the yellow box.</p>
+        <div id="reader" style="width:100%;max-width:500px;margin:0 auto;"></div>
+        <div id="status" style="text-align:center;margin-top:10px;padding:10px;background:#f9fafb;border-radius:5px;color:#666;">
+            ⏳ Starting camera...
+        </div>
         <div style="text-align:center;margin-top:15px;">
             <button onclick="startScanner()" class="btn btn-success">▶️ Start Camera</button>
             <button onclick="stopScanner()" class="btn btn-danger">⏹️ Stop Camera</button>
@@ -74,76 +74,112 @@ def scan_page(request: Request, code: str = ""):
         <h3>🖊️ Manual Entry</h3>
         <p style="color:#666;font-size:14px;">If the camera can't read the barcode, type it here:</p>
         <form method="get" action="/scan" style="display:flex;gap:10px;flex-wrap:wrap;">
-            <input type="text" name="code" placeholder="Enter barcode or SKU" style="flex:1;min-width:200px;margin:0;">
+            <input type="text" name="code" placeholder="Enter SKU or barcode" style="flex:1;min-width:200px;margin:0;">
             <button type="submit" class="btn">Search</button>
         </form>
     </div>
 
     <div class="card">
-        <h3>ℹ️ How It Works</h3>
+        <h3>💡 Tips for Better Scanning</h3>
         <ul>
-            <li>Point your phone camera at a barcode</li>
-            <li>The app finds the material and shows it below</li>
-            <li>Click <strong>Add to Cart</strong> to add it to the current sale</li>
-            <li>Keep scanning more items, then go to Cart to checkout</li>
-            <li>Or type the barcode/SKU manually if needed</li>
+            <li><strong>Lighting:</strong> Use in a well-lit area (natural light is best)</li>
+            <li><strong>Distance:</strong> Hold phone 10–15 cm from the barcode</li>
+            <li><strong>Angle:</strong> Keep phone parallel to the label (not tilted)</li>
+            <li><strong>Steady:</strong> Hold still for 2 seconds — don't rush</li>
+            <li><strong>Focus:</strong> Tap the screen where the barcode is to help autofocus</li>
+            <li><strong>Clean lens:</strong> Wipe camera lens with soft cloth</li>
         </ul>
     </div>
 
-    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+    <div class="card">
+        <h3>✅ What Barcodes Work</h3>
+        <p style="font-size:14px;">This scanner supports:</p>
+        <ul style="font-size:14px;">
+            <li>CODE 128 (used by our printed labels)</li>
+            <li>Code 39</li>
+            <li>EAN-13, EAN-8 (product barcodes)</li>
+            <li>UPC-A, UPC-E</li>
+            <li>ITF (Interleaved 2 of 5)</li>
+            <li>QR Codes</li>
+        </ul>
+    </div>
+
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
     <script>
     var html5QrCode = null;
-    var scanning = false;
+    var isScanning = false;
+
+    function setStatus(msg, color) {{
+        var el = document.getElementById('status');
+        el.innerText = msg;
+        el.style.color = color || '#666';
+    }}
 
     function startScanner() {{
-        if (scanning) return;
-        document.getElementById('status').innerText = 'Starting camera...';
+        if (isScanning) return;
+        setStatus('⏳ Requesting camera...', '#666');
 
         if (!html5QrCode) {{
-            html5QrCode = new Html5Qrcode("reader");
+            try {{
+                html5QrCode = new Html5Qrcode("reader", {{ verbose: false }});
+            }} catch (e) {{
+                setStatus('❌ Failed to initialize scanner: ' + e.message, '#dc2626');
+                return;
+            }}
         }}
 
+        // Try environment camera (back camera), then fallback
         html5QrCode.start(
             {{ facingMode: "environment" }},
             {{
-                fps: 10,
-                qrbox: {{ width: 250, height: 150 }},
-                formatsToSupport: [
-                    Html5QrcodeSupportedFormats.EAN_13,
-                    Html5QrcodeSupportedFormats.EAN_8,
-                    Html5QrcodeSupportedFormats.UPC_A,
-                    Html5QrcodeSupportedFormats.UPC_E,
-                    Html5QrcodeSupportedFormats.CODE_128,
-                    Html5QrcodeSupportedFormats.CODE_39,
-                    Html5QrcodeSupportedFormats.QR_CODE,
-                    Html5QrcodeSupportedFormats.ITF
-                ]
+                fps: 15,
+                qrbox: function(viewfinderWidth, viewfinderHeight) {{
+                    var minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+                    var size = Math.floor(minEdge * 0.75);
+                    return {{ width: size, height: Math.floor(size * 0.6) }};
+                }},
+                aspectRatio: 1.5,
+                disableFlip: false
             }},
-            function(decodedText) {{
-                document.getElementById('status').innerText = 'Found: ' + decodedText;
+            function onScanSuccess(decodedText, decodedResult) {{
+                setStatus('✅ Found: ' + decodedText, '#16a34a');
+                if (navigator.vibrate) navigator.vibrate(100);
                 stopScanner();
-                window.location.href = '/scan?code=' + encodeURIComponent(decodedText);
+                setTimeout(function() {{
+                    window.location.href = '/scan?code=' + encodeURIComponent(decodedText);
+                }}, 400);
             }},
-            function(errorMessage) {{ }}
+            function onScanFailure(error) {{
+                // Quietly ignore frame misses (happens constantly when no barcode in view)
+            }}
         ).then(function() {{
-            scanning = true;
-            document.getElementById('status').innerText = 'Scanning... hold barcode steady';
+            isScanning = true;
+            setStatus('🔍 Scanning... point at a barcode', '#1e40af');
         }}).catch(function(err) {{
-            document.getElementById('status').innerText = '❌ Camera error: ' + err;
+            var msg = String(err);
+            if (msg.indexOf('NotAllowed') >= 0) {{
+                setStatus('❌ Camera permission denied. Please allow camera access.', '#dc2626');
+            }} else if (msg.indexOf('NotFound') >= 0) {{
+                setStatus('❌ No camera found on this device.', '#dc2626');
+            }} else {{
+                setStatus('❌ Camera error: ' + msg, '#dc2626');
+            }}
         }});
     }}
 
     function stopScanner() {{
-        if (html5QrCode && scanning) {{
+        if (html5QrCode && isScanning) {{
             html5QrCode.stop().then(function() {{
-                scanning = false;
-                document.getElementById('status').innerText = 'Camera stopped';
-            }}).catch(function(err) {{ console.log('Stop error:', err); }});
+                isScanning = false;
+                setStatus('⏸️ Camera stopped', '#666');
+            }}).catch(function(err) {{
+                console.log('Stop error:', err);
+            }});
         }}
     }}
 
     window.addEventListener('load', function() {{
-        setTimeout(startScanner, 500);
+        setTimeout(startScanner, 800);
     }});
 
     window.addEventListener('beforeunload', function() {{
@@ -152,63 +188,3 @@ def scan_page(request: Request, code: str = ""):
     </script>
     """
     return page("Scan", body, username, role)
-
-
-@router.get("/barcodes", response_class=HTMLResponse)
-def barcodes_page(request: Request):
-    username = get_current_user(request)
-    if not username:
-        return RedirectResponse("/login", status_code=303)
-    info = get_user_info(username)
-    if not info or info.get("role") != "admin":
-        raise HTTPException(403, "Only admins can print barcodes")
-
-    products = supabase.table("products").select("*").eq("is_active", True).order("name").execute().data
-
-    labels = ""
-    for p in products:
-        code = p.get("barcode") or p.get("sku") or f"P{p['id']}"
-        price = float(p.get("selling_price", 0))
-        labels += f"""
-        <div class="barcode-label">
-            <div class="name">{p['name']}</div>
-            <div class="price">GHS {price:,.2f} / {p.get('unit','')}</div>
-            <svg class="barcode-svg" data-code="{code}"></svg>
-            <div style="font-size:11px;margin-top:3px;">{code}</div>
-        </div>
-        """
-
-    body = f"""
-    <h2>🏷️ Barcode Labels</h2>
-
-    <div class="card no-print">
-        <p><strong>{len(products)}</strong> materials. Each will get a barcode label using its SKU (or barcode if set).</p>
-        <button onclick="window.print()" class="btn btn-success">🖨️ Print All Labels</button>
-        <a href="/products" class="btn">← Back to Materials</a>
-    </div>
-
-    <div class="card">
-        {labels if labels else "<p>No materials to print labels for.</p>"}
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
-    <script>
-    window.addEventListener('load', function() {{
-        document.querySelectorAll('.barcode-svg').forEach(function(svg) {{
-            var code = svg.getAttribute('data-code');
-            try {{
-                JsBarcode(svg, code, {{
-                    format: 'CODE128',
-                    width: 1.5,
-                    height: 50,
-                    displayValue: false,
-                    margin: 0
-                }});
-            }} catch (e) {{
-                svg.outerHTML = '<div style="font-size:11px;color:#dc2626;">Barcode error</div>';
-            }}
-        }});
-    }});
-    </script>
-    """
-    return page("Barcodes", body, username, info.get("role"))
