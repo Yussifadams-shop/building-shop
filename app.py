@@ -12,6 +12,7 @@ from auth import (
     create_session, get_current_user, COOKIE_NAME,
     verify_login, get_user_info, is_admin, log_activity
 )
+from barcode_routes import router as barcode_router
 
 load_dotenv()
 
@@ -24,6 +25,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = FastAPI(title="Building Materials Shop")
+app.include_router(barcode_router)
 
 SHOP_NAME = "OBOLO TILES & CEMENT"
 SHOP_PHONE = "053500108"
@@ -34,6 +36,8 @@ def page(title, body, user=None, role=None, extra_head=""):
     if user and role == "admin":
         menu = ("<a href='/'>Home</a>"
                 "<a href='/products'>Materials</a>"
+                "<a href='/scan'>📷 Scan</a>"
+                "<a href='/barcodes'>🏷️ Barcodes</a>"
                 "<a href='/customers'>Customers</a>"
                 "<a href='/suppliers'>Suppliers</a>"
                 "<a href='/add'>Add</a>"
@@ -51,6 +55,7 @@ def page(title, body, user=None, role=None, extra_head=""):
     elif user and role == "cashier":
         menu = ("<a href='/'>Home</a>"
                 "<a href='/products'>Materials</a>"
+                "<a href='/scan'>📷 Scan</a>"
                 "<a href='/customers'>Customers</a>"
                 "<a href='/suppliers'>Suppliers</a>"
                 "<a href='/sell'>New Sale</a>"
@@ -125,7 +130,6 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .date-bar .field {{ flex: 1; min-width: 150px; }}
 .period-badge {{ display: inline-block; background: #1e40af; color: white; padding: 6px 14px; border-radius: 20px; font-size: 14px; font-weight: bold; margin-bottom: 10px; }}
 
-/* P&L styles */
 .pnl-table {{ width: 100%; border-collapse: collapse; font-size: 15px; }}
 .pnl-table td {{ padding: 10px 15px; border-bottom: 1px solid #eee; }}
 .pnl-table .label-col {{ text-align: left; }}
@@ -139,18 +143,28 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .pnl-profit {{ background: #dcfce7; color: #166534; }}
 .pnl-loss {{ background: #fee2e2; color: #991b1b; }}
 
-/* Activity log styles */
-.severity-info {{ color: #1e40af; }}
-.severity-warning {{ color: #d97706; font-weight: bold; }}
-.severity-danger {{ color: #dc2626; font-weight: bold; }}
 .badge {{ display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }}
 .badge-info {{ background: #dbeafe; color: #1e40af; }}
 .badge-warning {{ background: #fef3c7; color: #92400e; }}
 .badge-danger {{ background: #fee2e2; color: #991b1b; }}
 
-/* Chart container */
 .chart-container {{ position: relative; height: 300px; margin-top: 10px; }}
-@media (max-width: 768px) {{ .chart-container {{ height: 250px; }} }}
+
+/* Scanner & barcode styles */
+#reader {{ width: 100%; max-width: 500px; margin: 0 auto; border-radius: 8px; overflow: hidden; }}
+.scan-result {{ padding: 15px; border-radius: 8px; margin-top: 15px; font-size: 16px; text-align: center; }}
+.scan-success {{ background: #dcfce7; border: 2px solid #16a34a; color: #166534; }}
+.scan-error {{ background: #fee2e2; border: 2px solid #dc2626; color: #991b1b; }}
+.barcode-label {{ display: inline-block; padding: 10px; border: 1px solid #000; margin: 5px; background: white; text-align: center; width: 220px; }}
+.barcode-label .name {{ font-weight: bold; font-size: 13px; margin-bottom: 2px; }}
+.barcode-label .price {{ font-size: 12px; margin-bottom: 5px; }}
+.barcode-label svg {{ max-width: 100%; }}
+@media print {{
+    .no-print, .header, .btn, button, .menu-links, .user-bar {{ display: none !important; }}
+    .barcode-label {{ page-break-inside: avoid; }}
+    body {{ background: white; }}
+    .card {{ box-shadow: none; padding: 0; }}
+}}
 
 @media (max-width: 768px) {{
     .menu-toggle {{ display: block; }}
@@ -172,6 +186,8 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
     .date-bar .field {{ width: 100%; }}
     .pnl-table td {{ padding: 8px 10px; font-size: 14px; }}
     .pnl-table .amount-col {{ width: 120px; }}
+    .chart-container {{ height: 250px; }}
+    .barcode-label {{ width: 100%; max-width: 220px; }}
 }}
 </style>
 </head>
@@ -542,14 +558,12 @@ def home(request: Request):
     customers = supabase.table("customers").select("*").eq("is_active", True).execute().data
     total_owed = sum(float(c.get("balance", 0)) for c in customers)
 
-    # CHART DATA (admin only)
     chart_section = ""
     charts_script = ""
     if role == "admin":
         all_sales = supabase.table("sales").select("*").execute().data
         all_items = supabase.table("sale_items").select("*").execute().data
 
-        # Last 30 days daily sales
         today = datetime.now().date()
         days_30 = [(today - timedelta(days=i)) for i in range(29, -1, -1)]
         daily_labels = [d.strftime('%d/%m') for d in days_30]
@@ -562,7 +576,6 @@ def home(request: Request):
                     total += float(s.get("total", 0))
             daily_totals.append(round(total, 2))
 
-        # Top 10 materials by revenue
         material_rev = {}
         for it in all_items:
             name = it.get("product_name", "Unknown")
@@ -572,7 +585,6 @@ def home(request: Request):
         top_labels = [t[0] for t in top_items]
         top_values = [round(t[1], 2) for t in top_items]
 
-        # Payment method breakdown
         payment_totals = {}
         for s in all_sales:
             pm = s.get("payment_method", "Cash")
@@ -580,7 +592,6 @@ def home(request: Request):
         payment_labels = list(payment_totals.keys())
         payment_values = [round(v, 2) for v in payment_totals.values()]
 
-        # Monthly sales (last 6 months)
         month_labels = []
         month_totals = []
         for i in range(5, -1, -1):
@@ -633,7 +644,6 @@ def home(request: Request):
         var monLabels = {json.dumps(month_labels)};
         var monData = {json.dumps(month_totals)};
 
-        // Daily chart
         new Chart(document.getElementById('dailyChart'), {{
             type: 'line',
             data: {{
@@ -648,68 +658,34 @@ def home(request: Request):
                     pointRadius: 2
                 }}]
             }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{ legend: {{ display: false }} }},
-                scales: {{ y: {{ beginAtZero: true }} }}
-            }}
+            options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }}
         }});
 
-        // Payment pie chart
         new Chart(document.getElementById('paymentChart'), {{
             type: 'doughnut',
             data: {{
                 labels: payLabels,
-                datasets: [{{
-                    data: payData,
-                    backgroundColor: ['#1e40af','#16a34a','#d97706','#dc2626','#7c3aed','#0891b2']
-                }}]
+                datasets: [{{ data: payData, backgroundColor: ['#1e40af','#16a34a','#d97706','#dc2626','#7c3aed','#0891b2'] }}]
             }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{ legend: {{ position: 'bottom' }} }}
-            }}
+            options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ position: 'bottom' }} }} }}
         }});
 
-        // Top materials bar chart
         new Chart(document.getElementById('topChart'), {{
             type: 'bar',
             data: {{
                 labels: topLabels,
-                datasets: [{{
-                    label: 'Revenue (GHS)',
-                    data: topData,
-                    backgroundColor: '#1e40af'
-                }}]
+                datasets: [{{ label: 'Revenue (GHS)', data: topData, backgroundColor: '#1e40af' }}]
             }},
-            options: {{
-                indexAxis: 'y',
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{ legend: {{ display: false }} }},
-                scales: {{ x: {{ beginAtZero: true }} }}
-            }}
+            options: {{ indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ beginAtZero: true }} }} }}
         }});
 
-        // Monthly chart
         new Chart(document.getElementById('monthlyChart'), {{
             type: 'bar',
             data: {{
                 labels: monLabels,
-                datasets: [{{
-                    label: 'Sales (GHS)',
-                    data: monData,
-                    backgroundColor: '#16a34a'
-                }}]
+                datasets: [{{ label: 'Sales (GHS)', data: monData, backgroundColor: '#16a34a' }}]
             }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{ legend: {{ display: false }} }},
-                scales: {{ y: {{ beginAtZero: true }} }}
-            }}
+            options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }}
         }});
         </script>
         """
@@ -1725,10 +1701,7 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
             </div>
 
             <h2 style="text-align:center;color:#1e40af;margin-top:0;">CUSTOMER STATEMENT</h2>
-
-            <p style="text-align:center;color:#666;font-size:14px;">
-                Period: <strong>{start}</strong> to <strong>{end}</strong>
-            </p>
+            <p style="text-align:center;color:#666;font-size:14px;">Period: <strong>{start}</strong> to <strong>{end}</strong></p>
 
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;">
                 <div>
@@ -1776,13 +1749,11 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
                 <p style="margin:10px 0 0 0;font-size:32px;font-weight:bold;color:{'#dc2626' if balance > 0 else '#16a34a'};">
                     GHS {balance:,.2f}
                 </p>
-                {'<p style="margin:10px 0 0 0;font-size:14px;color:#991b1b;">Kindly settle this balance at your earliest convenience.</p>' if balance > 0 else '<p style="margin:10px 0 0 0;font-size:14px;color:#166534;">Thank you! Your account is up to date.</p>'}
             </div>
 
             <div style="margin-top:25px;padding-top:15px;border-top:1px solid #ddd;text-align:center;color:#666;font-size:13px;">
                 <p style="margin:5px 0;">This is a computer-generated statement. Please retain for your records.</p>
                 <p style="margin:5px 0;">For questions, call <strong>{SHOP_PHONE}</strong></p>
-                <p style="margin:15px 0 0 0;font-style:italic;">Thank you for your business!</p>
             </div>
         </div>
 
@@ -1806,15 +1777,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
             </form>
         </div>
     </div>
-
-    <style>
-    @media print {{
-        .header, .btn, button, .no-print {{ display: none !important; }}
-        body {{ background: white; }}
-        .card {{ box-shadow: none; padding: 0; }}
-        @page {{ margin: 1cm; }}
-    }}
-    </style>
     """
     return HTMLResponse(content=page("Statement", body, username, role))
 
@@ -2412,7 +2374,6 @@ def expense_new_form(request: Request):
 
     cats = supabase.table("expense_categories").select("*").order("name").execute().data
     cat_options = "".join(f"<option value='{c['id']}' data-name='{c['name']}'>{c['name']}</option>" for c in cats)
-
     today = datetime.now().strftime("%Y-%m-%d")
 
     body = f"""
@@ -2421,22 +2382,14 @@ def expense_new_form(request: Request):
         <form method="post" action="/expenses/new">
             <label>Date</label>
             <input type="date" name="expense_date" value="{today}" required>
-
             <label>Category</label>
-            <select name="category_id" required>
-                <option value="">-- Select category --</option>
-                {cat_options}
-            </select>
-
+            <select name="category_id" required><option value="">-- Select category --</option>{cat_options}</select>
             <label>Amount (GHS)</label>
             <input type="number" step="0.01" name="amount" required min="0.01">
-
             <label>Description</label>
             <input type="text" name="description" placeholder="e.g. September rent">
-
             <label>Paid To</label>
             <input type="text" name="paid_to" placeholder="e.g. Landlord name">
-
             <label>Payment Method</label>
             <select name="payment_method">
                 <option value="Cash">💵 Cash</option>
@@ -2444,7 +2397,6 @@ def expense_new_form(request: Request):
                 <option value="Bank Transfer">🏦 Bank Transfer</option>
                 <option value="Card">💳 Card</option>
             </select>
-
             <button type="submit" class="btn btn-success">Save Expense</button>
             <a href="/expenses" class="btn">Cancel</a>
         </form>
@@ -2632,7 +2584,6 @@ def daily_summary(request: Request):
         raise HTTPException(403, "Only admins can view the summary")
 
     today = datetime.now().date()
-
     sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
 
     today_sales = []
@@ -2779,7 +2730,8 @@ def sell_page(request: Request):
     body = f"""
     <h2>New Sale — Add Items to Cart</h2>
     <div class="card">
-        <a href="/cart" class="btn btn-success" style="margin-bottom:15px;">🛒 View Cart & Checkout</a>
+        <a href="/scan" class="btn btn-success" style="margin-bottom:10px;">📷 Scan Barcode</a>
+        <a href="/cart" class="btn btn-success" style="margin-bottom:10px;">🛒 View Cart & Checkout</a>
         <div class="table-wrap">
         <table>
             <tr><th>Material</th><th>Stock</th><th>Price</th><th>Add to Cart</th></tr>
@@ -2822,6 +2774,7 @@ def cart_page(request: Request):
         <div class="card">
             <p>Your cart is empty.</p>
             <a href="/sell" class="btn">Start Adding Items</a>
+            <a href="/scan" class="btn btn-success">📷 Scan Barcode</a>
         </div>
         """
         return HTMLResponse(content=page("Cart", body, username, role))
@@ -2890,6 +2843,7 @@ def cart_page(request: Request):
             <br>
             <button type="submit" class="btn btn-success">✅ Complete Sale</button>
             <a href="/sell" class="btn">+ Add More</a>
+            <a href="/scan" class="btn">📷 Scan More</a>
             <a href="/cart/clear" class="btn btn-danger">Clear Cart</a>
         </form>
     </div>
@@ -3066,13 +3020,6 @@ def receipt(request: Request, sale_id: int):
         <a href="/sell" class="btn">New Sale</a>
         <a href="/" class="btn">Dashboard</a>
     </div>
-    <style>
-    @media print {{
-        .header, .btn, button {{ display: none !important; }}
-        body {{ background: white; }}
-        .card {{ box-shadow: none; }}
-    }}
-    </style>
     """
     return HTMLResponse(content=page("Receipt", body, username, role))
 
@@ -3411,14 +3358,8 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
     <div class="card date-bar">
         <h3 style="margin-top:0;">📅 Select Period</h3>
         <form method="get" action="/reports">
-            <div class="field">
-                <label>From</label>
-                <input type="date" name="start" value="{start}">
-            </div>
-            <div class="field">
-                <label>To</label>
-                <input type="date" name="end" value="{end}">
-            </div>
+            <div class="field"><label>From</label><input type="date" name="start" value="{start}"></div>
+            <div class="field"><label>To</label><input type="date" name="end" value="{end}"></div>
             <button type="submit" class="btn">Apply</button>
         </form>
         <div class="quick-links">
@@ -3445,12 +3386,10 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
         <div class="card stat"><div class="num">{len(period_sales)}</div><div class="label">Sales in Period</div></div>
         <div class="card stat"><div class="num">GHS {period_total:,.2f}</div><div class="label">Total Revenue</div></div>
     </div>
-
     <div class="grid">
         <div class="card stat"><div class="num" style="color:#dc2626;">GHS {period_credit:,.2f}</div><div class="label">On Credit</div></div>
         <div class="card stat"><div class="num" style="color:#dc2626;">GHS {period_expenses:,.2f}</div><div class="label">Expenses</div></div>
     </div>
-
     <div class="grid">
         <div class="card stat"><div class="num" style="color:#16a34a;">GHS {period_gross_profit:,.2f}</div><div class="label">Gross Profit</div></div>
         <div class="card stat"><div class="num" style="color:{'#16a34a' if period_net_profit >= 0 else '#dc2626'};">GHS {period_net_profit:,.2f}</div><div class="label">Net Profit</div></div>
