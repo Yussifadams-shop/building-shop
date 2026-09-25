@@ -41,6 +41,7 @@ def page(title, body, user=None, role=None):
                 "<a href='/cart'>Cart</a>"
                 "<a href='/expenses'>💰 Expenses</a>"
                 "<a href='/margins'>📈 Margins</a>"
+                "<a href='/pnl'>📊 P&L</a>"
                 "<a href='/alerts'>🚨 Alerts</a>"
                 "<a href='/summary'>📅 Daily</a>"
                 "<a href='/reports'>Reports</a>"
@@ -117,6 +118,26 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .loss-box {{ background: #fee2e2; border-left: 6px solid #dc2626; }}
 .success-msg {{ background: #dcfce7; border: 2px solid #16a34a; color: #166534; padding: 15px; border-radius: 8px; margin-bottom: 15px; }}
 .error-msg {{ background: #fee2e2; border: 2px solid #dc2626; color: #991b1b; padding: 15px; border-radius: 8px; margin-bottom: 15px; }}
+.date-bar {{ background: #dbeafe; border: 2px solid #1e40af; padding: 15px; border-radius: 8px; }}
+.date-bar form {{ display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }}
+.date-bar .field {{ flex: 1; min-width: 150px; }}
+.date-bar input {{ margin: 4px 0 0 0; }}
+.period-badge {{ display: inline-block; background: #1e40af; color: white; padding: 6px 14px; border-radius: 20px; font-size: 14px; font-weight: bold; margin-bottom: 10px; }}
+
+/* P&L specific styles */
+.pnl-table {{ width: 100%; border-collapse: collapse; font-size: 15px; }}
+.pnl-table td {{ padding: 10px 15px; border-bottom: 1px solid #eee; }}
+.pnl-table .label-col {{ text-align: left; }}
+.pnl-table .amount-col {{ text-align: right; font-weight: bold; width: 180px; }}
+.pnl-section-header {{ background: #1e40af; color: white; font-weight: bold; }}
+.pnl-section-header td {{ padding: 10px 15px; }}
+.pnl-subtotal {{ background: #f0f4ff; font-weight: bold; font-size: 16px; }}
+.pnl-subtotal td {{ padding: 12px 15px; border-top: 2px solid #1e40af; border-bottom: 2px solid #1e40af; }}
+.pnl-final {{ font-size: 18px; }}
+.pnl-final td {{ padding: 15px; font-weight: bold; border-top: 3px double #1e40af; border-bottom: 3px double #1e40af; }}
+.pnl-profit {{ background: #dcfce7; color: #166534; }}
+.pnl-loss {{ background: #fee2e2; color: #991b1b; }}
+
 @media (max-width: 768px) {{
     .menu-toggle {{ display: block; }}
     .menu-links {{ display: none; flex-direction: column; align-items: stretch; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25); }}
@@ -133,6 +154,10 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
     button, .btn {{ width: 100%; text-align: center; margin: 5px 0; }}
     .btn-small {{ width: auto; }}
     .big-num {{ font-size: 32px; }}
+    .date-bar form {{ flex-direction: column; }}
+    .date-bar .field {{ width: 100%; }}
+    .pnl-table td {{ padding: 8px 10px; font-size: 14px; }}
+    .pnl-table .amount-col {{ width: 120px; }}
 }}
 </style>
 </head>
@@ -356,6 +381,331 @@ def home(request: Request):
     return HTMLResponse(content=page("Dashboard", body, username, role))
 
 
+# ============ PROFIT & LOSS REPORT ============
+
+@app.get("/pnl", response_class=HTMLResponse)
+def pnl_report(request: Request, start: str = "", end: str = "", preset: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can view P&L")
+
+    now = datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
+
+    # Presets
+    if preset == "month":
+        start = now.replace(day=1).strftime("%Y-%m-%d")
+        end = today_str
+    elif preset == "lastmonth":
+        first_this = now.replace(day=1)
+        last_prev = first_this - timedelta(days=1)
+        start = last_prev.replace(day=1).strftime("%Y-%m-%d")
+        end = last_prev.strftime("%Y-%m-%d")
+    elif preset == "quarter":
+        q_month = ((now.month - 1) // 3) * 3 + 1
+        start = now.replace(month=q_month, day=1).strftime("%Y-%m-%d")
+        end = today_str
+    elif preset == "year":
+        start = now.replace(month=1, day=1).strftime("%Y-%m-%d")
+        end = today_str
+    elif preset == "all":
+        start = "2020-01-01"
+        end = today_str
+
+    if not start:
+        start = now.replace(day=1).strftime("%Y-%m-%d")
+    if not end:
+        end = today_str
+
+    period_label = f"{start} to {end}"
+
+    def in_range(date_str):
+        if not date_str:
+            return False
+        d = str(date_str)[:10]
+        return start <= d <= end
+
+    # Load data
+    all_sales = supabase.table("sales").select("*").execute().data
+    all_items = supabase.table("sale_items").select("*").execute().data
+    all_expenses = supabase.table("expenses").select("*").execute().data
+
+    period_sales = [s for s in all_sales if in_range(s.get("created_at", ""))]
+    sale_ids = [s["id"] for s in period_sales]
+    period_items = [it for it in all_items if it.get("sale_id") in sale_ids]
+    period_expenses = [e for e in all_expenses if in_range(e.get("expense_date", ""))]
+
+    # REVENUE
+    revenue = sum(float(s.get("total", 0)) for s in period_sales)
+
+    # COST OF GOODS SOLD
+    cogs = sum(float(it.get("cost_price", 0)) * float(it.get("quantity", 0)) for it in period_items)
+
+    # GROSS PROFIT
+    gross_profit = revenue - cogs
+
+    # EXPENSES BY CATEGORY
+    expense_by_cat = {}
+    for e in period_expenses:
+        cat = e.get("category_name", "Miscellaneous")
+        expense_by_cat[cat] = expense_by_cat.get(cat, 0) + float(e.get("amount", 0))
+    total_expenses = sum(expense_by_cat.values())
+
+    # NET PROFIT
+    net_profit = gross_profit - total_expenses
+
+    # Margins
+    gross_margin_pct = (gross_profit / revenue * 100) if revenue > 0 else 0
+    net_margin_pct = (net_profit / revenue * 100) if revenue > 0 else 0
+
+    # Build expense rows
+    expense_rows = ""
+    for cat, amt in sorted(expense_by_cat.items(), key=lambda x: -x[1]):
+        pct = (amt / total_expenses * 100) if total_expenses > 0 else 0
+        expense_rows += f"""<tr>
+            <td class="label-col">&nbsp;&nbsp;&nbsp;{cat}</td>
+            <td class="amount-col">GHS {amt:,.2f}</td>
+        </tr>"""
+
+    if not expense_rows:
+        expense_rows = '<tr><td class="label-col" colspan="2" style="text-align:center;color:#666;">No expenses in this period</td></tr>'
+
+    # Print styles
+    print_style = """
+    <style>
+    @media print {
+        .header, .btn, button, .no-print { display: none !important; }
+        body { background: white; }
+        .card { box-shadow: none; padding: 0; margin: 0; }
+        .pnl-table { page-break-inside: avoid; }
+        @page { margin: 1.5cm; }
+    }
+    </style>
+    """
+
+    net_class = "pnl-profit" if net_profit >= 0 else "pnl-loss"
+    net_label = "NET PROFIT" if net_profit >= 0 else "NET LOSS"
+
+    body = f"""
+    <div class="card date-bar no-print">
+        <h3 style="margin-top:0;">📅 Select Period</h3>
+        <form method="get" action="/pnl">
+            <div class="field">
+                <label>From</label>
+                <input type="date" name="start" value="{start}">
+            </div>
+            <div class="field">
+                <label>To</label>
+                <input type="date" name="end" value="{end}">
+            </div>
+            <button type="submit" class="btn">Apply</button>
+        </form>
+        <div class="quick-links" style="margin-top:10px;">
+            <a href="/pnl?preset=month" class="btn btn-quick">This Month</a>
+            <a href="/pnl?preset=lastmonth" class="btn btn-quick">Last Month</a>
+            <a href="/pnl?preset=quarter" class="btn btn-quick">This Quarter</a>
+            <a href="/pnl?preset=year" class="btn btn-quick">This Year</a>
+            <a href="/pnl?preset=all" class="btn btn-quick">All Time</a>
+        </div>
+    </div>
+
+    <div class="card" style="max-width:850px;margin:0 auto;padding:35px;">
+        <div style="text-align:center;border-bottom:3px solid #1e40af;padding-bottom:15px;margin-bottom:25px;">
+            <h1 style="color:#1e40af;margin:0;font-size:26px;">🏗️ {SHOP_NAME}</h1>
+            <p style="margin:5px 0 0 0;color:#666;">{SHOP_ADDRESS}</p>
+            <p style="margin:2px 0 0 0;color:#666;">📞 {SHOP_PHONE}</p>
+        </div>
+
+        <h2 style="text-align:center;color:#1e40af;margin-top:0;">PROFIT & LOSS STATEMENT</h2>
+        <p style="text-align:center;color:#666;font-size:14px;margin-bottom:25px;">
+            Period: <strong>{start}</strong> to <strong>{end}</strong>
+        </p>
+
+        <table class="pnl-table">
+            <tr class="pnl-section-header">
+                <td class="label-col">REVENUE</td>
+                <td class="amount-col">AMOUNT (GHS)</td>
+            </tr>
+            <tr>
+                <td class="label-col">&nbsp;&nbsp;&nbsp;Total Sales Revenue ({len(period_sales)} sales)</td>
+                <td class="amount-col">{revenue:,.2f}</td>
+            </tr>
+            <tr class="pnl-subtotal">
+                <td class="label-col">TOTAL REVENUE</td>
+                <td class="amount-col">{revenue:,.2f}</td>
+            </tr>
+
+            <tr class="pnl-section-header">
+                <td class="label-col">COST OF GOODS SOLD</td>
+                <td class="amount-col"></td>
+            </tr>
+            <tr>
+                <td class="label-col">&nbsp;&nbsp;&nbsp;Cost of materials sold</td>
+                <td class="amount-col">({cogs:,.2f})</td>
+            </tr>
+            <tr class="pnl-subtotal">
+                <td class="label-col">GROSS PROFIT</td>
+                <td class="amount-col">{gross_profit:,.2f}</td>
+            </tr>
+            <tr>
+                <td class="label-col" style="color:#666;font-size:13px;">&nbsp;&nbsp;&nbsp;Gross Margin: {gross_margin_pct:.1f}%</td>
+                <td class="amount-col"></td>
+            </tr>
+
+            <tr class="pnl-section-header">
+                <td class="label-col">OPERATING EXPENSES</td>
+                <td class="amount-col"></td>
+            </tr>
+            {expense_rows}
+            <tr class="pnl-subtotal">
+                <td class="label-col">TOTAL EXPENSES</td>
+                <td class="amount-col">({total_expenses:,.2f})</td>
+            </tr>
+
+            <tr class="pnl-final {net_class}">
+                <td class="label-col">{net_label}</td>
+                <td class="amount-col">GHS {net_profit:,.2f}</td>
+            </tr>
+        </table>
+
+        <div style="margin-top:20px;text-align:center;color:#666;font-size:13px;">
+            <p style="margin:5px 0;">Net Profit Margin: <strong>{net_margin_pct:.1f}%</strong></p>
+        </div>
+
+        <div style="margin-top:30px;padding-top:15px;border-top:1px solid #ddd;text-align:center;color:#666;font-size:12px;">
+            <p style="margin:5px 0;">Generated on {now.strftime('%d %B %Y at %H:%M')} by {username}</p>
+            <p style="margin:5px 0;">This is a computer-generated statement.</p>
+        </div>
+    </div>
+
+    <div class="card no-print" style="text-align:center;">
+        <button onclick="window.print()" class="btn btn-success">🖨️ Print P&L Statement</button>
+        <a href="/export/pnl?start={start}&end={end}" class="btn btn-success">📥 Export to Excel</a>
+        <a href="/reports" class="btn">← Back to Reports</a>
+    </div>
+
+    {print_style}
+    """
+    return HTMLResponse(content=page("Profit & Loss", body, username, info.get("role")))
+
+
+@app.get("/export/pnl")
+def export_pnl(request: Request, start: str = "", end: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can export P&L")
+
+    now = datetime.now()
+    if not start:
+        start = now.replace(day=1).strftime("%Y-%m-%d")
+    if not end:
+        end = now.strftime("%Y-%m-%d")
+
+    def in_range(date_str):
+        if not date_str:
+            return False
+        d = str(date_str)[:10]
+        return start <= d <= end
+
+    all_sales = supabase.table("sales").select("*").execute().data
+    all_items = supabase.table("sale_items").select("*").execute().data
+    all_expenses = supabase.table("expenses").select("*").execute().data
+
+    period_sales = [s for s in all_sales if in_range(s.get("created_at", ""))]
+    sale_ids = [s["id"] for s in period_sales]
+    period_items = [it for it in all_items if it.get("sale_id") in sale_ids]
+    period_expenses = [e for e in all_expenses if in_range(e.get("expense_date", ""))]
+
+    revenue = sum(float(s.get("total", 0)) for s in period_sales)
+    cogs = sum(float(it.get("cost_price", 0)) * float(it.get("quantity", 0)) for it in period_items)
+    gross_profit = revenue - cogs
+
+    expense_by_cat = {}
+    for e in period_expenses:
+        cat = e.get("category_name", "Miscellaneous")
+        expense_by_cat[cat] = expense_by_cat.get(cat, 0) + float(e.get("amount", 0))
+    total_expenses = sum(expense_by_cat.values())
+    net_profit = gross_profit - total_expenses
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Profit and Loss"
+
+    # Title rows
+    ws.append([SHOP_NAME])
+    ws.append(["PROFIT & LOSS STATEMENT"])
+    ws.append([f"Period: {start} to {end}"])
+    ws.append([])
+
+    bold_font = Font(bold=True)
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"].font = Font(bold=True, size=12)
+
+    # Header
+    ws.append(["Item", "Amount (GHS)"])
+    header_row = ws.max_row
+    ws.cell(row=header_row, column=1).font = Font(bold=True, color="FFFFFF")
+    ws.cell(row=header_row, column=2).font = Font(bold=True, color="FFFFFF")
+    ws.cell(row=header_row, column=1).fill = PatternFill(start_color="1E40AF", end_color="1E40AF", fill_type="solid")
+    ws.cell(row=header_row, column=2).fill = PatternFill(start_color="1E40AF", end_color="1E40AF", fill_type="solid")
+
+    # Body
+    ws.append(["REVENUE", ""])
+    ws.cell(row=ws.max_row, column=1).font = bold_font
+    ws.append([f"  Total Sales ({len(period_sales)} sales)", revenue])
+    ws.append(["TOTAL REVENUE", revenue])
+    ws.cell(row=ws.max_row, column=1).font = bold_font
+    ws.cell(row=ws.max_row, column=2).font = bold_font
+
+    ws.append([])
+    ws.append(["COST OF GOODS SOLD", ""])
+    ws.cell(row=ws.max_row, column=1).font = bold_font
+    ws.append(["  Cost of materials sold", cogs])
+    ws.append(["GROSS PROFIT", gross_profit])
+    ws.cell(row=ws.max_row, column=1).font = bold_font
+    ws.cell(row=ws.max_row, column=2).font = bold_font
+
+    ws.append([])
+    ws.append(["OPERATING EXPENSES", ""])
+    ws.cell(row=ws.max_row, column=1).font = bold_font
+    for cat, amt in sorted(expense_by_cat.items(), key=lambda x: -x[1]):
+        ws.append([f"  {cat}", amt])
+    if not expense_by_cat:
+        ws.append(["  (none)", 0])
+    ws.append(["TOTAL EXPENSES", total_expenses])
+    ws.cell(row=ws.max_row, column=1).font = bold_font
+    ws.cell(row=ws.max_row, column=2).font = bold_font
+
+    ws.append([])
+    ws.append(["NET PROFIT" if net_profit >= 0 else "NET LOSS", net_profit])
+    ws.cell(row=ws.max_row, column=1).font = Font(bold=True, size=12)
+    ws.cell(row=ws.max_row, column=2).font = Font(bold=True, size=12)
+    if net_profit >= 0:
+        ws.cell(row=ws.max_row, column=1).fill = PatternFill(start_color="DCFCE7", end_color="DCFCE7", fill_type="solid")
+        ws.cell(row=ws.max_row, column=2).fill = PatternFill(start_color="DCFCE7", end_color="DCFCE7", fill_type="solid")
+    else:
+        ws.cell(row=ws.max_row, column=1).fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+        ws.cell(row=ws.max_row, column=2).fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+
+    ws.column_dimensions['A'].width = 45
+    ws.column_dimensions['B'].width = 18
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=OBOLO_PnL_{start}_to_{end}.xlsx"}
+    )
+
+
 # ============ PRODUCTS ============
 
 @app.get("/products", response_class=HTMLResponse)
@@ -530,7 +880,6 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
     products = supabase.table("products").select("*").eq("is_active", True).execute().data
     all_items = supabase.table("sale_items").select("*").execute().data
 
-    # qty sold per product
     sold_stats = {}
     for it in all_items:
         pid = it.get("product_id")
@@ -553,7 +902,6 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
         margin_pct = (profit_per_unit / sell * 100) if sell > 0 else 0
 
         stat = sold_stats.get(p["id"], {"qty": 0, "revenue": 0, "cost": 0})
-        qty_sold = stat["qty"]
         total_profit = stat["revenue"] - stat["cost"]
 
         rows_data.append({
@@ -565,12 +913,11 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
             "sell": sell,
             "profit_per_unit": profit_per_unit,
             "margin_pct": margin_pct,
-            "qty_sold": qty_sold,
+            "qty_sold": stat["qty"],
             "revenue": stat["revenue"],
             "total_profit": total_profit,
         })
 
-    # filter
     if filter_type == "profit":
         rows_data = [r for r in rows_data if r["profit_per_unit"] > 0]
     elif filter_type == "loss":
@@ -580,7 +927,6 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
     elif filter_type == "highmargin":
         rows_data = [r for r in rows_data if r["margin_pct"] >= 30]
 
-    # sort
     if sort_by == "margin":
         rows_data.sort(key=lambda x: x["margin_pct"], reverse=True)
     elif sort_by == "profit":
@@ -590,13 +936,11 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
     elif sort_by == "name":
         rows_data.sort(key=lambda x: x["name"].lower())
 
-    # summary stats
     total_materials = len(products)
     avg_margin = (sum(r["margin_pct"] for r in rows_data) / len(rows_data)) if rows_data else 0
     profitable_count = sum(1 for r in rows_data if r["profit_per_unit"] > 0)
     loss_count = sum(1 for r in rows_data if r["profit_per_unit"] <= 0)
 
-    # best and worst
     best = max(rows_data, key=lambda x: x["margin_pct"], default=None)
     worst = min(rows_data, key=lambda x: x["margin_pct"], default=None)
 
@@ -968,7 +1312,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
         })
 
     transactions.sort(key=lambda x: x["date"])
-
     period_debit = sum(t["debit"] for t in transactions)
     period_credit = sum(t["credit"] for t in transactions)
 
@@ -2704,7 +3047,7 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
     </div>
 
     <div class="card">
-        <span class="period-badge" style="display:inline-block;background:#1e40af;color:white;padding:6px 14px;border-radius:20px;font-size:14px;font-weight:bold;margin-bottom:10px;">📅 Period: {period_label}</span>
+        <span class="period-badge">📅 Period: {period_label}</span>
         <h3>📥 Export to Excel</h3>
         <a href="/export/sales?start={start}&end={end}" class="btn btn-success">📥 Sales for this period</a>
         <a href="/export/products" class="btn btn-success">📥 All Materials</a>
@@ -2732,6 +3075,10 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
         <h3 style="margin:0;">{'💰' if period_net_profit >= 0 else '⚠️'} {'Net Profit' if period_net_profit >= 0 else 'Net Loss'} for Period</h3>
         <div class="big-num" style="color:{'#16a34a' if period_net_profit >= 0 else '#dc2626'};">GHS {period_net_profit:,.2f}</div>
         <p style="text-align:center;color:#666;">Revenue − Cost of Goods − Expenses</p>
+    </div>
+
+    <div class="card" style="text-align:center;">
+        <a href="/pnl?start={start}&end={end}" class="btn btn-success" style="font-size:16px;padding:14px 24px;">📊 View Full Profit & Loss Statement</a>
     </div>
 
     <div class="card">
