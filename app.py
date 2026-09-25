@@ -10,7 +10,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 from auth import (
     create_session, get_current_user, COOKIE_NAME,
-    verify_login, get_user_info, is_admin
+    verify_login, get_user_info, is_admin, log_activity
 )
 
 load_dotenv()
@@ -42,6 +42,7 @@ def page(title, body, user=None, role=None):
                 "<a href='/expenses'>💰 Expenses</a>"
                 "<a href='/margins'>📈 Margins</a>"
                 "<a href='/pnl'>📊 P&L</a>"
+                "<a href='/activity'>📝 Activity</a>"
                 "<a href='/alerts'>🚨 Alerts</a>"
                 "<a href='/summary'>📅 Daily</a>"
                 "<a href='/reports'>Reports</a>"
@@ -121,10 +122,9 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .date-bar {{ background: #dbeafe; border: 2px solid #1e40af; padding: 15px; border-radius: 8px; }}
 .date-bar form {{ display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }}
 .date-bar .field {{ flex: 1; min-width: 150px; }}
-.date-bar input {{ margin: 4px 0 0 0; }}
 .period-badge {{ display: inline-block; background: #1e40af; color: white; padding: 6px 14px; border-radius: 20px; font-size: 14px; font-weight: bold; margin-bottom: 10px; }}
 
-/* P&L specific styles */
+/* P&L styles */
 .pnl-table {{ width: 100%; border-collapse: collapse; font-size: 15px; }}
 .pnl-table td {{ padding: 10px 15px; border-bottom: 1px solid #eee; }}
 .pnl-table .label-col {{ text-align: left; }}
@@ -137,6 +137,15 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .pnl-final td {{ padding: 15px; font-weight: bold; border-top: 3px double #1e40af; border-bottom: 3px double #1e40af; }}
 .pnl-profit {{ background: #dcfce7; color: #166534; }}
 .pnl-loss {{ background: #fee2e2; color: #991b1b; }}
+
+/* Activity log styles */
+.severity-info {{ color: #1e40af; }}
+.severity-warning {{ color: #d97706; font-weight: bold; }}
+.severity-danger {{ color: #dc2626; font-weight: bold; }}
+.badge {{ display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }}
+.badge-info {{ background: #dbeafe; color: #1e40af; }}
+.badge-warning {{ background: #fef3c7; color: #92400e; }}
+.badge-danger {{ background: #fee2e2; color: #991b1b; }}
 
 @media (max-width: 768px) {{
     .menu-toggle {{ display: block; }}
@@ -186,6 +195,11 @@ def parse_dt(s):
         return None
 
 
+def log(username, action_type, description, severity="info", details=None):
+    """Convenience wrapper for logging."""
+    log_activity(username, action_type, description, severity, details)
+
+
 # ============ AUTH ============
 
 @app.get("/login", response_class=HTMLResponse)
@@ -220,10 +234,195 @@ async def do_login(username: str = Form(...), password: str = Form(...)):
 
 
 @app.get("/logout")
-def logout():
+def logout(request: Request):
+    username = get_current_user(request)
+    if username:
+        log(username, "logout", f"User '{username}' logged out")
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(COOKIE_NAME)
     return response
+
+
+# ============ ACTIVITY LOG ============
+
+@app.get("/activity", response_class=HTMLResponse)
+def activity_page(request: Request, user_filter: str = "", type_filter: str = "", severity_filter: str = "", start: str = "", end: str = "", search: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can view activity log")
+
+    # Fetch logs (latest 500)
+    logs = supabase.table("activity_log").select("*").order("created_at", desc=True).limit(500).execute().data
+
+    # Apply filters
+    filtered = []
+    for lg in logs:
+        if user_filter and lg.get("username") != user_filter:
+            continue
+        if type_filter and lg.get("action_type") != type_filter:
+            continue
+        if severity_filter and lg.get("severity") != severity_filter:
+            continue
+        if start:
+            d = str(lg.get("created_at", ""))[:10]
+            if d < start:
+                continue
+        if end:
+            d = str(lg.get("created_at", ""))[:10]
+            if d > end:
+                continue
+        if search:
+            search_lower = search.lower()
+            if search_lower not in str(lg.get("description", "")).lower() and search_lower not in str(lg.get("username", "")).lower():
+                continue
+        filtered.append(lg)
+
+    # Get unique users and types for filter dropdowns
+    all_users = sorted(set(lg.get("username", "") for lg in logs if lg.get("username")))
+    all_types = sorted(set(lg.get("action_type", "") for lg in logs if lg.get("action_type")))
+
+    # Stats
+    total_logs = len(logs)
+    failed_logins = len([lg for lg in logs if lg.get("action_type") == "login_failed"])
+    deletions = len([lg for lg in logs if lg.get("action_type") in ["material_delete", "expense_delete"]])
+    price_changes = len([lg for lg in logs if lg.get("action_type") == "price_change"])
+
+    user_options = "".join(f"<option value='{u}' {'selected' if u==user_filter else ''}>{u}</option>" for u in all_users)
+    type_options = "".join(f"<option value='{t}' {'selected' if t==type_filter else ''}>{t.replace('_', ' ').title()}</option>" for t in all_types)
+
+    rows = ""
+    for lg in filtered:
+        sev = lg.get("severity", "info")
+        badge_class = f"badge-{sev}"
+        icon = {"info": "ℹ️", "warning": "⚠️", "danger": "🚨"}.get(sev, "ℹ️")
+        dt = str(lg.get("created_at", ""))[:19].replace("T", " ")
+        rows += f"""<tr>
+            <td><small>{dt}</small></td>
+            <td><strong>{lg.get('username', 'unknown')}</strong></td>
+            <td><span class="badge {badge_class}">{icon} {lg.get('action_type', '').replace('_', ' ').title()}</span></td>
+            <td>{lg.get('description', '')}</td>
+        </tr>"""
+
+    body = f"""
+    <h2>📝 Activity Log</h2>
+
+    <div class="grid">
+        <div class="card stat"><div class="num">{total_logs}</div><div class="label">Total Events (last 500)</div></div>
+        <div class="card stat"><div class="num" style="color:#dc2626;">{failed_logins}</div><div class="label">Failed Logins</div></div>
+    </div>
+
+    <div class="grid">
+        <div class="card stat"><div class="num" style="color:#dc2626;">{deletions}</div><div class="label">Deletions</div></div>
+        <div class="card stat"><div class="num" style="color:#d97706;">{price_changes}</div><div class="label">Price Changes</div></div>
+    </div>
+
+    <div class="card">
+        <h3>🔍 Filters</h3>
+        <form method="get" action="/activity">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:150px;">
+                    <label>User</label>
+                    <select name="user_filter">
+                        <option value="">All Users</option>
+                        {user_options}
+                    </select>
+                </div>
+                <div style="flex:1;min-width:150px;">
+                    <label>Action Type</label>
+                    <select name="type_filter">
+                        <option value="">All Types</option>
+                        {type_options}
+                    </select>
+                </div>
+                <div style="flex:1;min-width:150px;">
+                    <label>Severity</label>
+                    <select name="severity_filter">
+                        <option value="">All</option>
+                        <option value="info" {'selected' if severity_filter=='info' else ''}>Info</option>
+                        <option value="warning" {'selected' if severity_filter=='warning' else ''}>Warning</option>
+                        <option value="danger" {'selected' if severity_filter=='danger' else ''}>Danger</option>
+                    </select>
+                </div>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;">
+                <div style="flex:1;min-width:150px;">
+                    <label>From</label>
+                    <input type="date" name="start" value="{start}">
+                </div>
+                <div style="flex:1;min-width:150px;">
+                    <label>To</label>
+                    <input type="date" name="end" value="{end}">
+                </div>
+                <div style="flex:1;min-width:200px;">
+                    <label>Search</label>
+                    <input type="text" name="search" value="{search}" placeholder="Search description...">
+                </div>
+            </div>
+            <div style="margin-top:10px;">
+                <button type="submit" class="btn">Apply Filters</button>
+                <a href="/activity" class="btn btn-quick">Clear</a>
+                <a href="/export/activity" class="btn btn-success">📥 Export to Excel</a>
+            </div>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3>📋 Events ({len(filtered)})</h3>
+        <div class="table-wrap">
+        <table>
+            <tr><th>When</th><th>User</th><th>Action</th><th>Details</th></tr>
+            {rows if rows else "<tr><td colspan='4'>No events match your filters.</td></tr>"}
+        </table>
+        </div>
+        <p style="margin-top:15px;color:#666;font-size:13px;">
+            ℹ️ Info &nbsp;·&nbsp; ⚠️ Warning &nbsp;·&nbsp; 🚨 Danger &nbsp;·&nbsp; Showing latest 500 events
+        </p>
+    </div>
+    """
+    return HTMLResponse(content=page("Activity", body, username, info.get("role")))
+
+
+@app.get("/export/activity")
+def export_activity(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can export activity log")
+
+    logs = supabase.table("activity_log").select("*").order("created_at", desc=True).limit(5000).execute().data
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Activity Log"
+    headers = ["When", "User", "Action", "Severity", "Description"]
+    style_header(ws, headers)
+
+    for lg in logs:
+        ws.append([
+            str(lg.get("created_at", ""))[:19].replace("T", " "),
+            lg.get("username", ""),
+            lg.get("action_type", ""),
+            lg.get("severity", ""),
+            lg.get("description", ""),
+        ])
+
+    widths = [22, 15, 22, 12, 70]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=OBOLO_activity_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
+    )
 
 
 # ============ MY ACCOUNT ============
@@ -303,6 +502,8 @@ async def change_password(request: Request, current_password: str = Form(...), n
 
     supabase.table("shop_users").update({"password": new_password}).eq("username", username).execute()
 
+    log(username, "password_change", f"User '{username}' changed their password", "warning")
+
     response = RedirectResponse("/login?error=Password+changed+successfully.+Please+log+in+again", status_code=303)
     response.delete_cookie(COOKIE_NAME)
     return response
@@ -381,7 +582,189 @@ def home(request: Request):
     return HTMLResponse(content=page("Dashboard", body, username, role))
 
 
-# ============ PROFIT & LOSS REPORT ============
+# ============ PRODUCTS ============
+
+@app.get("/products", response_class=HTMLResponse)
+def products_list(request: Request, search: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+
+    query = supabase.table("products").select("*").eq("is_active", True)
+    if search:
+        query = query.ilike("name", f"%{search}%")
+    products = query.order("name").execute().data
+
+    show_actions = role == "admin"
+    rows = ""
+    for p in products:
+        qty = float(p.get("quantity_in_stock", 0))
+        reorder = float(p.get("reorder_level", 0))
+        status = "low" if qty <= reorder else "ok"
+        actions = ""
+        if show_actions:
+            actions = (f"<a href='/edit/{p['id']}' class='btn btn-warn btn-small'>✏️</a> "
+                       f"<a href='/delete/{p['id']}' class='btn btn-danger btn-small' onclick=\"return confirm('Delete {p['name']}?')\">🗑️</a>")
+        rows += f"""<tr>
+            <td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td>
+            <td>{p.get('unit','')}</td>
+            <td class='{status}'>{qty}</td>
+            <td>GHS {float(p['selling_price']):,.2f}</td>
+            {f"<td>{actions}</td>" if show_actions else ""}
+        </tr>"""
+
+    headers = "<tr><th>Material</th><th>Unit</th><th>Stock</th><th>Price</th>"
+    if show_actions:
+        headers += "<th>Actions</th>"
+    headers += "</tr>"
+    add_button = "<a href='/add' class='btn'>➕ Add Material</a>" if role == "admin" else ""
+
+    body = f"""
+    <h2>All Materials</h2>
+    <div class="card">
+        {add_button}
+        <form method="get" style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;">
+            <input type="text" name="search" placeholder="Search..." value="{search}" style="flex:1;min-width:200px;">
+            <button type="submit">Search</button>
+        </form>
+    </div>
+    <div class="card"><div class="table-wrap"><table>{headers}{rows if rows else "<tr><td colspan='5'>No materials yet.</td></tr>"}</table></div></div>
+    """
+    return HTMLResponse(content=page("Materials", body, username, role))
+
+
+@app.get("/add", response_class=HTMLResponse)
+def add_form(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can add materials")
+    cats = supabase.table("categories").select("*").order("name").execute().data
+    cat_options = "".join(f"<option value='{c['id']}'>{c['name']}</option>" for c in cats)
+    body = f"""
+    <h2>Add Material</h2>
+    <div class="card">
+        <form method="post" action="/add">
+            <label>Name</label><input type="text" name="name" required>
+            <label>SKU</label><input type="text" name="sku" required>
+            <label>Category</label><select name="category_id" required><option value="">--</option>{cat_options}</select>
+            <label>Unit</label><input type="text" name="unit" required placeholder="bag">
+            <label>Location</label><input type="text" name="location">
+            <label>Cost Price</label><input type="number" step="0.01" name="cost_price" required>
+            <label>Selling Price</label><input type="number" step="0.01" name="selling_price" required>
+            <label>Quantity</label><input type="number" step="0.01" name="quantity_in_stock" required>
+            <label>Reorder Level</label><input type="number" step="0.01" name="reorder_level" value="10">
+            <button type="submit">Save</button>
+            <a href="/products" class="btn">Cancel</a>
+        </form>
+    </div>
+    """
+    return HTMLResponse(content=page("Add", body, username, info.get("role")))
+
+
+@app.post("/add")
+async def add_product(request: Request, name: str = Form(...), sku: str = Form(...), category_id: str = Form(...), unit: str = Form(...), location: str = Form(""), cost_price: float = Form(...), selling_price: float = Form(...), quantity_in_stock: float = Form(...), reorder_level: float = Form(10)):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can add materials")
+    data = {"name": name, "sku": sku, "category_id": int(category_id), "unit": unit, "location": location or None, "cost_price": cost_price, "selling_price": selling_price, "quantity_in_stock": quantity_in_stock, "reorder_level": reorder_level, "is_active": True}
+    result = supabase.table("products").insert(data).execute()
+    if result.data and quantity_in_stock > 0:
+        supabase.table("stock_movements").insert({"product_id": result.data[0]["id"], "movement_type": "IN", "quantity": quantity_in_stock, "unit_cost": cost_price, "note": "Opening stock"}).execute()
+    log(username, "material_add", f"Added new material '{name}' (SKU: {sku}, Qty: {quantity_in_stock}, Price: GHS {selling_price})", "info")
+    return RedirectResponse("/products", status_code=303)
+
+
+@app.get("/edit/{product_id}", response_class=HTMLResponse)
+def edit_form(request: Request, product_id: int):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can edit materials")
+    p = supabase.table("products").select("*").eq("id", product_id).single().execute().data
+    cats = supabase.table("categories").select("*").order("name").execute().data
+    cat_options = "".join(f"<option value='{c['id']}' {'selected' if c['id']==p.get('category_id') else ''}>{c['name']}</option>" for c in cats)
+    body = f"""
+    <h2>Edit Material</h2>
+    <div class="card">
+        <form method="post" action="/edit/{product_id}">
+            <label>Name</label><input type="text" name="name" value="{p['name']}" required>
+            <label>SKU</label><input type="text" name="sku" value="{p.get('sku','')}" required>
+            <label>Category</label><select name="category_id" required>{cat_options}</select>
+            <label>Unit</label><input type="text" name="unit" value="{p.get('unit','')}" required>
+            <label>Location</label><input type="text" name="location" value="{p.get('location','') or ''}">
+            <label>Cost Price</label><input type="number" step="0.01" name="cost_price" value="{p['cost_price']}" required>
+            <label>Selling Price</label><input type="number" step="0.01" name="selling_price" value="{p['selling_price']}" required>
+            <label>Current Stock</label><input type="number" step="0.01" name="quantity_in_stock" value="{p['quantity_in_stock']}" required>
+            <label>Reorder Level</label><input type="number" step="0.01" name="reorder_level" value="{p['reorder_level']}">
+            <button type="submit">Save Changes</button>
+            <a href="/products" class="btn">Cancel</a>
+        </form>
+    </div>
+    """
+    return HTMLResponse(content=page("Edit", body, username, info.get("role")))
+
+
+@app.post("/edit/{product_id}")
+async def edit_product(request: Request, product_id: int, name: str = Form(...), sku: str = Form(...), category_id: str = Form(...), unit: str = Form(...), location: str = Form(""), cost_price: float = Form(...), selling_price: float = Form(...), quantity_in_stock: float = Form(...), reorder_level: float = Form(10)):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can edit materials")
+    old = supabase.table("products").select("*").eq("id", product_id).single().execute().data
+    old_qty = float(old.get("quantity_in_stock", 0))
+    old_price = float(old.get("selling_price", 0))
+    old_cost = float(old.get("cost_price", 0))
+
+    data = {"name": name, "sku": sku, "category_id": int(category_id), "unit": unit, "location": location or None, "cost_price": cost_price, "selling_price": selling_price, "quantity_in_stock": quantity_in_stock, "reorder_level": reorder_level}
+    supabase.table("products").update(data).eq("id", product_id).execute()
+
+    # Log price changes
+    if abs(selling_price - old_price) > 0.001:
+        log(username, "price_change",
+            f"Changed SELLING price of '{name}' from GHS {old_price:,.2f} to GHS {selling_price:,.2f}",
+            "warning")
+    if abs(cost_price - old_cost) > 0.001:
+        log(username, "cost_change",
+            f"Changed COST price of '{name}' from GHS {old_cost:,.2f} to GHS {cost_price:,.2f}",
+            "warning")
+
+    if abs(quantity_in_stock - old_qty) > 0.001:
+        supabase.table("stock_movements").insert({"product_id": product_id, "movement_type": "ADJUSTMENT", "quantity": quantity_in_stock - old_qty, "note": f"Manual edit by {username}"}).execute()
+        log(username, "stock_adjust",
+            f"Adjusted stock of '{name}' from {old_qty} to {quantity_in_stock} (change: {quantity_in_stock - old_qty})",
+            "warning")
+
+    log(username, "material_edit", f"Edited material '{name}' (SKU: {sku})", "info")
+    return RedirectResponse("/products", status_code=303)
+
+
+@app.get("/delete/{product_id}")
+def delete_product(request: Request, product_id: int):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can delete materials")
+    old = supabase.table("products").select("*").eq("id", product_id).single().execute().data
+    supabase.table("products").update({"is_active": False}).eq("id", product_id).execute()
+    log(username, "material_delete", f"DELETED material '{old.get('name','')}' (SKU: {old.get('sku','')})", "danger")
+    return RedirectResponse("/products", status_code=303)
+
+
+# ============ PROFIT & LOSS ============
 
 @app.get("/pnl", response_class=HTMLResponse)
 def pnl_report(request: Request, start: str = "", end: str = "", preset: str = ""):
@@ -395,7 +778,6 @@ def pnl_report(request: Request, start: str = "", end: str = "", preset: str = "
     now = datetime.now()
     today_str = now.strftime("%Y-%m-%d")
 
-    # Presets
     if preset == "month":
         start = now.replace(day=1).strftime("%Y-%m-%d")
         end = today_str
@@ -420,15 +802,12 @@ def pnl_report(request: Request, start: str = "", end: str = "", preset: str = "
     if not end:
         end = today_str
 
-    period_label = f"{start} to {end}"
-
     def in_range(date_str):
         if not date_str:
             return False
         d = str(date_str)[:10]
         return start <= d <= end
 
-    # Load data
     all_sales = supabase.table("sales").select("*").execute().data
     all_items = supabase.table("sale_items").select("*").execute().data
     all_expenses = supabase.table("expenses").select("*").execute().data
@@ -438,53 +817,28 @@ def pnl_report(request: Request, start: str = "", end: str = "", preset: str = "
     period_items = [it for it in all_items if it.get("sale_id") in sale_ids]
     period_expenses = [e for e in all_expenses if in_range(e.get("expense_date", ""))]
 
-    # REVENUE
     revenue = sum(float(s.get("total", 0)) for s in period_sales)
-
-    # COST OF GOODS SOLD
     cogs = sum(float(it.get("cost_price", 0)) * float(it.get("quantity", 0)) for it in period_items)
-
-    # GROSS PROFIT
     gross_profit = revenue - cogs
 
-    # EXPENSES BY CATEGORY
     expense_by_cat = {}
     for e in period_expenses:
         cat = e.get("category_name", "Miscellaneous")
         expense_by_cat[cat] = expense_by_cat.get(cat, 0) + float(e.get("amount", 0))
     total_expenses = sum(expense_by_cat.values())
-
-    # NET PROFIT
     net_profit = gross_profit - total_expenses
 
-    # Margins
     gross_margin_pct = (gross_profit / revenue * 100) if revenue > 0 else 0
     net_margin_pct = (net_profit / revenue * 100) if revenue > 0 else 0
 
-    # Build expense rows
     expense_rows = ""
     for cat, amt in sorted(expense_by_cat.items(), key=lambda x: -x[1]):
-        pct = (amt / total_expenses * 100) if total_expenses > 0 else 0
         expense_rows += f"""<tr>
             <td class="label-col">&nbsp;&nbsp;&nbsp;{cat}</td>
             <td class="amount-col">GHS {amt:,.2f}</td>
         </tr>"""
-
     if not expense_rows:
         expense_rows = '<tr><td class="label-col" colspan="2" style="text-align:center;color:#666;">No expenses in this period</td></tr>'
-
-    # Print styles
-    print_style = """
-    <style>
-    @media print {
-        .header, .btn, button, .no-print { display: none !important; }
-        body { background: white; }
-        .card { box-shadow: none; padding: 0; margin: 0; }
-        .pnl-table { page-break-inside: avoid; }
-        @page { margin: 1.5cm; }
-    }
-    </style>
-    """
 
     net_class = "pnl-profit" if net_profit >= 0 else "pnl-loss"
     net_label = "NET PROFIT" if net_profit >= 0 else "NET LOSS"
@@ -587,7 +941,15 @@ def pnl_report(request: Request, start: str = "", end: str = "", preset: str = "
         <a href="/reports" class="btn">← Back to Reports</a>
     </div>
 
-    {print_style}
+    <style>
+    @media print {{
+        .header, .btn, button, .no-print {{ display: none !important; }}
+        body {{ background: white; }}
+        .card {{ box-shadow: none; padding: 0; margin: 0; }}
+        .pnl-table {{ page-break-inside: avoid; }}
+        @page {{ margin: 1.5cm; }}
+    }}
+    </style>
     """
     return HTMLResponse(content=page("Profit & Loss", body, username, info.get("role")))
 
@@ -637,17 +999,14 @@ def export_pnl(request: Request, start: str = "", end: str = ""):
     ws = wb.active
     ws.title = "Profit and Loss"
 
-    # Title rows
     ws.append([SHOP_NAME])
     ws.append(["PROFIT & LOSS STATEMENT"])
     ws.append([f"Period: {start} to {end}"])
     ws.append([])
 
-    bold_font = Font(bold=True)
     ws["A1"].font = Font(bold=True, size=14)
     ws["A2"].font = Font(bold=True, size=12)
 
-    # Header
     ws.append(["Item", "Amount (GHS)"])
     header_row = ws.max_row
     ws.cell(row=header_row, column=1).font = Font(bold=True, color="FFFFFF")
@@ -655,32 +1014,31 @@ def export_pnl(request: Request, start: str = "", end: str = ""):
     ws.cell(row=header_row, column=1).fill = PatternFill(start_color="1E40AF", end_color="1E40AF", fill_type="solid")
     ws.cell(row=header_row, column=2).fill = PatternFill(start_color="1E40AF", end_color="1E40AF", fill_type="solid")
 
-    # Body
     ws.append(["REVENUE", ""])
-    ws.cell(row=ws.max_row, column=1).font = bold_font
+    ws.cell(row=ws.max_row, column=1).font = Font(bold=True)
     ws.append([f"  Total Sales ({len(period_sales)} sales)", revenue])
     ws.append(["TOTAL REVENUE", revenue])
-    ws.cell(row=ws.max_row, column=1).font = bold_font
-    ws.cell(row=ws.max_row, column=2).font = bold_font
+    ws.cell(row=ws.max_row, column=1).font = Font(bold=True)
+    ws.cell(row=ws.max_row, column=2).font = Font(bold=True)
 
     ws.append([])
     ws.append(["COST OF GOODS SOLD", ""])
-    ws.cell(row=ws.max_row, column=1).font = bold_font
+    ws.cell(row=ws.max_row, column=1).font = Font(bold=True)
     ws.append(["  Cost of materials sold", cogs])
     ws.append(["GROSS PROFIT", gross_profit])
-    ws.cell(row=ws.max_row, column=1).font = bold_font
-    ws.cell(row=ws.max_row, column=2).font = bold_font
+    ws.cell(row=ws.max_row, column=1).font = Font(bold=True)
+    ws.cell(row=ws.max_row, column=2).font = Font(bold=True)
 
     ws.append([])
     ws.append(["OPERATING EXPENSES", ""])
-    ws.cell(row=ws.max_row, column=1).font = bold_font
+    ws.cell(row=ws.max_row, column=1).font = Font(bold=True)
     for cat, amt in sorted(expense_by_cat.items(), key=lambda x: -x[1]):
         ws.append([f"  {cat}", amt])
     if not expense_by_cat:
         ws.append(["  (none)", 0])
     ws.append(["TOTAL EXPENSES", total_expenses])
-    ws.cell(row=ws.max_row, column=1).font = bold_font
-    ws.cell(row=ws.max_row, column=2).font = bold_font
+    ws.cell(row=ws.max_row, column=1).font = Font(bold=True)
+    ws.cell(row=ws.max_row, column=2).font = Font(bold=True)
 
     ws.append([])
     ws.append(["NET PROFIT" if net_profit >= 0 else "NET LOSS", net_profit])
@@ -704,166 +1062,6 @@ def export_pnl(request: Request, start: str = "", end: str = ""):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=OBOLO_PnL_{start}_to_{end}.xlsx"}
     )
-
-
-# ============ PRODUCTS ============
-
-@app.get("/products", response_class=HTMLResponse)
-def products_list(request: Request, search: str = ""):
-    username = get_current_user(request)
-    if not username:
-        return RedirectResponse("/login", status_code=303)
-    info = get_user_info(username)
-    role = info.get("role", "cashier") if info else "cashier"
-
-    query = supabase.table("products").select("*").eq("is_active", True)
-    if search:
-        query = query.ilike("name", f"%{search}%")
-    products = query.order("name").execute().data
-
-    show_actions = role == "admin"
-    rows = ""
-    for p in products:
-        qty = float(p.get("quantity_in_stock", 0))
-        reorder = float(p.get("reorder_level", 0))
-        status = "low" if qty <= reorder else "ok"
-        actions = ""
-        if show_actions:
-            actions = (f"<a href='/edit/{p['id']}' class='btn btn-warn btn-small'>✏️</a> "
-                       f"<a href='/delete/{p['id']}' class='btn btn-danger btn-small' onclick=\"return confirm('Delete {p['name']}?')\">🗑️</a>")
-        rows += f"""<tr>
-            <td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td>
-            <td>{p.get('unit','')}</td>
-            <td class='{status}'>{qty}</td>
-            <td>GHS {float(p['selling_price']):,.2f}</td>
-            {f"<td>{actions}</td>" if show_actions else ""}
-        </tr>"""
-
-    headers = "<tr><th>Material</th><th>Unit</th><th>Stock</th><th>Price</th>"
-    if show_actions:
-        headers += "<th>Actions</th>"
-    headers += "</tr>"
-    add_button = "<a href='/add' class='btn'>➕ Add Material</a>" if role == "admin" else ""
-
-    body = f"""
-    <h2>All Materials</h2>
-    <div class="card">
-        {add_button}
-        <form method="get" style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;">
-            <input type="text" name="search" placeholder="Search..." value="{search}" style="flex:1;min-width:200px;">
-            <button type="submit">Search</button>
-        </form>
-    </div>
-    <div class="card"><div class="table-wrap"><table>{headers}{rows if rows else "<tr><td colspan='5'>No materials yet.</td></tr>"}</table></div></div>
-    """
-    return HTMLResponse(content=page("Materials", body, username, role))
-
-
-@app.get("/add", response_class=HTMLResponse)
-def add_form(request: Request):
-    username = get_current_user(request)
-    if not username:
-        return RedirectResponse("/login", status_code=303)
-    info = get_user_info(username)
-    if not info or info.get("role") != "admin":
-        raise HTTPException(403, "Only admins can add materials")
-    cats = supabase.table("categories").select("*").order("name").execute().data
-    cat_options = "".join(f"<option value='{c['id']}'>{c['name']}</option>" for c in cats)
-    body = f"""
-    <h2>Add Material</h2>
-    <div class="card">
-        <form method="post" action="/add">
-            <label>Name</label><input type="text" name="name" required>
-            <label>SKU</label><input type="text" name="sku" required>
-            <label>Category</label><select name="category_id" required><option value="">--</option>{cat_options}</select>
-            <label>Unit</label><input type="text" name="unit" required placeholder="bag">
-            <label>Location</label><input type="text" name="location">
-            <label>Cost Price</label><input type="number" step="0.01" name="cost_price" required>
-            <label>Selling Price</label><input type="number" step="0.01" name="selling_price" required>
-            <label>Quantity</label><input type="number" step="0.01" name="quantity_in_stock" required>
-            <label>Reorder Level</label><input type="number" step="0.01" name="reorder_level" value="10">
-            <button type="submit">Save</button>
-            <a href="/products" class="btn">Cancel</a>
-        </form>
-    </div>
-    """
-    return HTMLResponse(content=page("Add", body, username, info.get("role")))
-
-
-@app.post("/add")
-async def add_product(request: Request, name: str = Form(...), sku: str = Form(...), category_id: str = Form(...), unit: str = Form(...), location: str = Form(""), cost_price: float = Form(...), selling_price: float = Form(...), quantity_in_stock: float = Form(...), reorder_level: float = Form(10)):
-    username = get_current_user(request)
-    if not username:
-        return RedirectResponse("/login", status_code=303)
-    info = get_user_info(username)
-    if not info or info.get("role") != "admin":
-        raise HTTPException(403, "Only admins can add materials")
-    data = {"name": name, "sku": sku, "category_id": int(category_id), "unit": unit, "location": location or None, "cost_price": cost_price, "selling_price": selling_price, "quantity_in_stock": quantity_in_stock, "reorder_level": reorder_level, "is_active": True}
-    result = supabase.table("products").insert(data).execute()
-    if result.data and quantity_in_stock > 0:
-        supabase.table("stock_movements").insert({"product_id": result.data[0]["id"], "movement_type": "IN", "quantity": quantity_in_stock, "unit_cost": cost_price, "note": "Opening stock"}).execute()
-    return RedirectResponse("/products", status_code=303)
-
-
-@app.get("/edit/{product_id}", response_class=HTMLResponse)
-def edit_form(request: Request, product_id: int):
-    username = get_current_user(request)
-    if not username:
-        return RedirectResponse("/login", status_code=303)
-    info = get_user_info(username)
-    if not info or info.get("role") != "admin":
-        raise HTTPException(403, "Only admins can edit materials")
-    p = supabase.table("products").select("*").eq("id", product_id).single().execute().data
-    cats = supabase.table("categories").select("*").order("name").execute().data
-    cat_options = "".join(f"<option value='{c['id']}' {'selected' if c['id']==p.get('category_id') else ''}>{c['name']}</option>" for c in cats)
-    body = f"""
-    <h2>Edit Material</h2>
-    <div class="card">
-        <form method="post" action="/edit/{product_id}">
-            <label>Name</label><input type="text" name="name" value="{p['name']}" required>
-            <label>SKU</label><input type="text" name="sku" value="{p.get('sku','')}" required>
-            <label>Category</label><select name="category_id" required>{cat_options}</select>
-            <label>Unit</label><input type="text" name="unit" value="{p.get('unit','')}" required>
-            <label>Location</label><input type="text" name="location" value="{p.get('location','') or ''}">
-            <label>Cost Price</label><input type="number" step="0.01" name="cost_price" value="{p['cost_price']}" required>
-            <label>Selling Price</label><input type="number" step="0.01" name="selling_price" value="{p['selling_price']}" required>
-            <label>Current Stock</label><input type="number" step="0.01" name="quantity_in_stock" value="{p['quantity_in_stock']}" required>
-            <label>Reorder Level</label><input type="number" step="0.01" name="reorder_level" value="{p['reorder_level']}">
-            <button type="submit">Save Changes</button>
-            <a href="/products" class="btn">Cancel</a>
-        </form>
-    </div>
-    """
-    return HTMLResponse(content=page("Edit", body, username, info.get("role")))
-
-
-@app.post("/edit/{product_id}")
-async def edit_product(request: Request, product_id: int, name: str = Form(...), sku: str = Form(...), category_id: str = Form(...), unit: str = Form(...), location: str = Form(""), cost_price: float = Form(...), selling_price: float = Form(...), quantity_in_stock: float = Form(...), reorder_level: float = Form(10)):
-    username = get_current_user(request)
-    if not username:
-        return RedirectResponse("/login", status_code=303)
-    info = get_user_info(username)
-    if not info or info.get("role") != "admin":
-        raise HTTPException(403, "Only admins can edit materials")
-    old = supabase.table("products").select("*").eq("id", product_id).single().execute().data
-    old_qty = float(old.get("quantity_in_stock", 0))
-    data = {"name": name, "sku": sku, "category_id": int(category_id), "unit": unit, "location": location or None, "cost_price": cost_price, "selling_price": selling_price, "quantity_in_stock": quantity_in_stock, "reorder_level": reorder_level}
-    supabase.table("products").update(data).eq("id", product_id).execute()
-    if abs(quantity_in_stock - old_qty) > 0.001:
-        supabase.table("stock_movements").insert({"product_id": product_id, "movement_type": "ADJUSTMENT", "quantity": quantity_in_stock - old_qty, "note": f"Manual edit by {username}"}).execute()
-    return RedirectResponse("/products", status_code=303)
-
-
-@app.get("/delete/{product_id}")
-def delete_product(request: Request, product_id: int):
-    username = get_current_user(request)
-    if not username:
-        return RedirectResponse("/login", status_code=303)
-    info = get_user_info(username)
-    if not info or info.get("role") != "admin":
-        raise HTTPException(403, "Only admins can delete materials")
-    supabase.table("products").update({"is_active": False}).eq("id", product_id).execute()
-    return RedirectResponse("/products", status_code=303)
 
 
 # ============ PROFIT MARGINS ============
@@ -1205,6 +1403,7 @@ async def customer_add(request: Request, name: str = Form(...), phone: str = For
         "balance": 0,
         "is_active": True
     }).execute()
+    log(username, "customer_add", f"Added new customer '{name}' (Phone: {phone or '—'})", "info")
     return RedirectResponse("/customers", status_code=303)
 
 
@@ -1501,6 +1700,7 @@ async def customer_pay(request: Request, customer_id: int, amount: float = Form(
         "recorded_by": username
     }).execute()
 
+    log(username, "customer_payment", f"Recorded payment of GHS {amount:,.2f} from customer '{c.get('name','')}' via {payment_method}", "info")
     return RedirectResponse(f"/customers/view/{customer_id}", status_code=303)
 
 
@@ -1616,6 +1816,7 @@ async def supplier_add(request: Request, name: str = Form(...), phone: str = For
         "notes": notes or None,
         "is_active": True
     }).execute()
+    log(username, "supplier_add", f"Added new supplier '{name}' (Phone: {phone or '—'})", "info")
     return RedirectResponse("/suppliers", status_code=303)
 
 
@@ -1891,6 +2092,7 @@ async def purchase_new(request: Request):
             "note": f"Purchase from {supplier_name} — {it['product_name']} x {it['quantity']}"
         }).execute()
 
+    log(username, "purchase_add", f"Recorded purchase from '{supplier_name}' - Total GHS {total:,.2f} ({len(items)} items)", "info")
     return RedirectResponse(f"/purchases/view/{purchase_id}", status_code=303)
 
 
@@ -2101,6 +2303,7 @@ async def expense_new(request: Request, expense_date: str = Form(...), category_
         "recorded_by": username
     }).execute()
 
+    log(username, "expense_add", f"Added expense: '{cat_name}' GHS {amount:,.2f} - {description or 'no description'}", "info")
     return RedirectResponse("/expenses", status_code=303)
 
 
@@ -2112,7 +2315,9 @@ def expense_delete(request: Request, expense_id: int):
     info = get_user_info(username)
     if not info or info.get("role") != "admin":
         raise HTTPException(403, "Only admins can delete expenses")
+    old = supabase.table("expenses").select("*").eq("id", expense_id).single().execute().data
     supabase.table("expenses").delete().eq("id", expense_id).execute()
+    log(username, "expense_delete", f"DELETED expense: '{old.get('category_name','')}' GHS {float(old.get('amount',0)):,.2f}", "danger")
     return RedirectResponse("/expenses", status_code=303)
 
 
@@ -2626,6 +2831,9 @@ async def cart_checkout(
         new_balance = float(cust_obj.get("balance", 0)) + credit_amount
         supabase.table("customers").update({"balance": new_balance}).eq("id", cust_obj["id"]).execute()
 
+    cust_display = customer_name or "Walk-in"
+    log(username, "sale", f"Sale {invoice_no} - Customer: {cust_display} - Total: GHS {final_total:,.2f} - Payment: {payment_method}", "info")
+
     response = RedirectResponse(f"/receipt/{sale_id}", status_code=303)
     response.delete_cookie("cart")
     return response
@@ -2776,6 +2984,7 @@ def category_delete(request: Request, category_id: int):
         others_id = new_others.data[0]["id"]
     supabase.table("products").update({"category_id": others_id}).eq("category_id", category_id).execute()
     supabase.table("categories").delete().eq("id", category_id).execute()
+    log(username, "category_delete", f"Deleted category (moved materials to 'Others')", "warning")
     return RedirectResponse("/categories", status_code=303)
 
 
@@ -2862,6 +3071,7 @@ async def users_add(request: Request, username: str = Form(...), password: str =
     existing = supabase.table("shop_users").select("*").eq("username", username).execute().data
     if not existing:
         supabase.table("shop_users").insert({"username": username, "password": password, "full_name": full_name, "role": role, "is_active": True}).execute()
+        log(current, "user_add", f"Created new user '{username}' with role '{role}'", "warning")
     return RedirectResponse("/users", status_code=303)
 
 
@@ -2912,6 +3122,7 @@ async def users_edit(request: Request, user_id: int, full_name: str = Form(""), 
     if password:
         data["password"] = password
     supabase.table("shop_users").update(data).eq("id", user_id).execute()
+    log(current, "user_edit", f"Edited user ID {user_id} (role: {role}, active: {is_active})", "warning")
     return RedirectResponse("/users", status_code=303)
 
 
@@ -2927,10 +3138,11 @@ def users_delete(request: Request, user_id: int):
     if u["username"] == current:
         raise HTTPException(400, "You cannot delete your own account")
     supabase.table("shop_users").delete().eq("id", user_id).execute()
+    log(current, "user_delete", f"DELETED user '{u.get('username','')}'", "danger")
     return RedirectResponse("/users", status_code=303)
 
 
-# ============ REPORTS (with Date Range) ============
+# ============ REPORTS ============
 
 @app.get("/reports", response_class=HTMLResponse)
 def reports(request: Request, start: str = "", end: str = "", preset: str = ""):

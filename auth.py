@@ -46,15 +46,32 @@ def get_user_info(username: str):
         return None
 
 
+def log_activity(username: str, action_type: str, description: str, severity: str = "info", details: dict = None):
+    """Log an activity to the activity_log table."""
+    try:
+        supabase.table("activity_log").insert({
+            "username": username or "unknown",
+            "action_type": action_type,
+            "description": description,
+            "severity": severity,
+            "details": details or {}
+        }).execute()
+    except Exception:
+        pass  # Don't break the app if logging fails
+
+
 def verify_login(username: str, password: str):
     """Check username + password against the shop_users table. Returns user dict or None."""
     try:
         result = supabase.table("shop_users").select("*").eq("username", username).eq("is_active", True).execute()
         if not result.data:
+            log_activity(username, "login_failed", f"Failed login attempt for '{username}' (user not found)", "warning")
             return None
         user = result.data[0]
         if user["password"] == password:
+            log_activity(username, "login_success", f"User '{username}' logged in successfully", "info")
             return user
+        log_activity(username, "login_failed", f"Failed login attempt for '{username}' (wrong password)", "warning")
         return None
     except Exception:
         return None
