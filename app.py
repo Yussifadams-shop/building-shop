@@ -95,6 +95,8 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .btn-danger {{ background: #dc2626; }}
 .btn-warn {{ background: #d97706; }}
 .btn-small {{ padding: 6px 12px; font-size: 13px; }}
+.btn-quick {{ background: #6b7280; padding: 6px 12px; font-size: 13px; margin: 2px; }}
+.btn-quick:hover {{ background: #4b5563; }}
 .low {{ color: #dc2626; font-weight: bold; }}
 .ok {{ color: #16a34a; font-weight: bold; }}
 .owed {{ color: #dc2626; font-weight: bold; font-size: 16px; }}
@@ -111,6 +113,12 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .loss-box {{ background: #fee2e2; border-left: 6px solid #dc2626; }}
 .success-msg {{ background: #dcfce7; border: 2px solid #16a34a; color: #166534; padding: 15px; border-radius: 8px; margin-bottom: 15px; }}
 .error-msg {{ background: #fee2e2; border: 2px solid #dc2626; color: #991b1b; padding: 15px; border-radius: 8px; margin-bottom: 15px; }}
+.date-bar {{ background: #dbeafe; border: 2px solid #1e40af; padding: 15px; border-radius: 8px; }}
+.date-bar form {{ display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }}
+.date-bar .field {{ flex: 1; min-width: 150px; }}
+.date-bar input {{ margin: 4px 0 0 0; }}
+.quick-links {{ margin-top: 10px; }}
+.period-badge {{ display: inline-block; background: #1e40af; color: white; padding: 6px 14px; border-radius: 20px; font-size: 14px; font-weight: bold; margin-bottom: 10px; }}
 @media (max-width: 768px) {{
     .menu-toggle {{ display: block; }}
     .menu-links {{ display: none; flex-direction: column; align-items: stretch; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25); }}
@@ -127,6 +135,8 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
     button, .btn {{ width: 100%; text-align: center; margin: 5px 0; }}
     .btn-small {{ width: auto; }}
     .big-num {{ font-size: 32px; }}
+    .date-bar form {{ flex-direction: column; }}
+    .date-bar .field {{ width: 100%; }}
 }}
 </style>
 </head>
@@ -144,6 +154,16 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 <div class="container">{body}</div>
 </body>
 </html>"""
+
+
+# ============ HELPERS ============
+
+def parse_dt(s):
+    """Safely parse a datetime string."""
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
 
 
 # ============ AUTH ============
@@ -665,7 +685,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
     info = get_user_info(username)
     role = info.get("role", "cashier") if info else "cashier"
 
-    # default to current month
     now = datetime.now()
     if not start:
         start = now.replace(day=1).strftime("%Y-%m-%d")
@@ -675,7 +694,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
     c = supabase.table("customers").select("*").eq("id", customer_id).single().execute().data
     balance = float(c.get("balance", 0))
 
-    # get all sales and payments, then filter by date
     all_sales = supabase.table("sales").select("*").eq("customer_id", customer_id).execute().data
     all_payments = supabase.table("customer_payments").select("*").eq("customer_id", customer_id).execute().data
 
@@ -688,7 +706,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
     period_sales = [s for s in all_sales if in_range(s.get("created_at", ""))]
     period_payments = [p for p in all_payments if in_range(p.get("created_at", ""))]
 
-    # build combined transaction list
     transactions = []
     for s in period_sales:
         transactions.append({
@@ -714,7 +731,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
     period_debit = sum(t["debit"] for t in transactions)
     period_credit = sum(t["credit"] for t in transactions)
 
-    # calculate opening balance
     opening_balance = 0.0
     for s in all_sales:
         d = str(s.get("created_at", ""))[:10]
@@ -746,22 +762,18 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
     body = f"""
     <div style="max-width:800px;margin:0 auto;">
         <div class="card" id="statement" style="padding:30px;">
-            <!-- Header -->
             <div style="text-align:center;border-bottom:3px solid #1e40af;padding-bottom:15px;margin-bottom:20px;">
                 <h1 style="color:#1e40af;margin:0;font-size:26px;">🏗️ {SHOP_NAME}</h1>
                 <p style="margin:5px 0 0 0;color:#666;">{SHOP_ADDRESS}</p>
                 <p style="margin:2px 0 0 0;color:#666;">📞 {SHOP_PHONE}</p>
             </div>
 
-            <!-- Title -->
             <h2 style="text-align:center;color:#1e40af;margin-top:0;">CUSTOMER STATEMENT</h2>
 
-            <!-- Statement period -->
             <p style="text-align:center;color:#666;font-size:14px;">
                 Period: <strong>{start}</strong> to <strong>{end}</strong>
             </p>
 
-            <!-- Customer info -->
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;">
                 <div>
                     <p style="margin:5px 0;font-size:14px;"><strong>Customer:</strong> {c['name']}</p>
@@ -774,7 +786,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
                 </div>
             </div>
 
-            <!-- Transaction table -->
             <div class="table-wrap">
             <table style="min-width:100%;font-size:14px;">
                 <thead>
@@ -804,7 +815,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
             </table>
             </div>
 
-            <!-- Current balance -->
             <div style="margin-top:25px;padding:20px;background:{'#fee2e2' if balance > 0 else '#dcfce7'};border-radius:8px;text-align:center;">
                 <p style="margin:0;font-size:14px;color:#666;">Current Balance Owed</p>
                 <p style="margin:10px 0 0 0;font-size:32px;font-weight:bold;color:{'#dc2626' if balance > 0 else '#16a34a'};">
@@ -813,7 +823,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
                 {'<p style="margin:10px 0 0 0;font-size:14px;color:#991b1b;">Kindly settle this balance at your earliest convenience.</p>' if balance > 0 else '<p style="margin:10px 0 0 0;font-size:14px;color:#166534;">Thank you! Your account is up to date.</p>'}
             </div>
 
-            <!-- Footer -->
             <div style="margin-top:25px;padding-top:15px;border-top:1px solid #ddd;text-align:center;color:#666;font-size:13px;">
                 <p style="margin:5px 0;">This is a computer-generated statement. Please retain for your records.</p>
                 <p style="margin:5px 0;">For questions, call <strong>{SHOP_PHONE}</strong></p>
@@ -821,13 +830,11 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
             </div>
         </div>
 
-        <!-- Action buttons (hidden when printing) -->
         <div style="text-align:center;margin-top:15px;" class="no-print">
             <button onclick="window.print()" class="btn btn-success">🖨️ Print Statement</button>
             <a href="/customers/view/{customer_id}" class="btn">← Back to Customer</a>
         </div>
 
-        <!-- Custom date range form (hidden when printing) -->
         <div class="card no-print" style="margin-top:15px;">
             <h3>📅 Change Period</h3>
             <form method="get" action="/customers/statement/{customer_id}" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
@@ -1666,15 +1673,9 @@ def daily_summary(request: Request):
 
     sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
 
-    def parse_date(s):
-        try:
-            return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
-        except Exception:
-            return None
-
     today_sales = []
     for s in sales:
-        d = parse_date(s.get("created_at", ""))
+        d = parse_dt(s.get("created_at", ""))
         if d and d.date() == today:
             today_sales.append(s)
 
@@ -2345,59 +2346,82 @@ def users_delete(request: Request, user_id: int):
     return RedirectResponse("/users", status_code=303)
 
 
-# ============ REPORTS ============
+# ============ REPORTS (with Date Range) ============
 
 @app.get("/reports", response_class=HTMLResponse)
-def reports(request: Request):
+def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
     username = get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=303)
     info = get_user_info(username)
     if not info or info.get("role") != "admin":
         raise HTTPException(403, "Only admins can view reports")
-    sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
+
     now = datetime.now()
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = now - timedelta(days=7)
-    month_start = now - timedelta(days=30)
+    today_str = now.strftime("%Y-%m-%d")
 
-    def parse_date(s):
-        try:
-            return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
-        except Exception:
-            return None
+    # Handle quick presets
+    if preset == "today":
+        start = today_str
+        end = today_str
+    elif preset == "week":
+        start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        end = today_str
+    elif preset == "month":
+        start = now.replace(day=1).strftime("%Y-%m-%d")
+        end = today_str
+    elif preset == "lastmonth":
+        first_of_this_month = now.replace(day=1)
+        last_of_prev = first_of_this_month - timedelta(days=1)
+        start = last_of_prev.replace(day=1).strftime("%Y-%m-%d")
+        end = last_of_prev.strftime("%Y-%m-%d")
+    elif preset == "year":
+        start = now.replace(month=1, day=1).strftime("%Y-%m-%d")
+        end = today_str
+    elif preset == "all":
+        start = ""
+        end = ""
 
-    today_total = 0.0
-    week_total = 0.0
-    month_total = 0.0
-    total_all = 0.0
-    total_credit = 0.0
-    for s in sales:
-        amount = float(s.get("total", 0))
-        total_all += amount
-        total_credit += float(s.get("amount_on_credit", 0))
-        d = parse_date(s.get("created_at", ""))
-        if d:
-            if d >= today_start:
-                today_total += amount
-            if d >= week_start:
-                week_total += amount
-            if d >= month_start:
-                month_total += amount
+    if not start:
+        start = now.replace(day=1).strftime("%Y-%m-%d")
+    if not end:
+        end = today_str
 
-    expenses = supabase.table("expenses").select("*").execute().data
-    month_expenses = 0.0
-    for e in expenses:
-        try:
-            d = datetime.fromisoformat(str(e.get("expense_date", "")).replace("Z", "+00:00")).replace(tzinfo=None)
-            if d >= month_start:
-                month_expenses += float(e.get("amount", 0))
-        except Exception:
-            pass
+    period_label = f"{start} to {end}"
 
-    items = supabase.table("sale_items").select("*").execute().data
+    def in_range(date_str):
+        if not date_str:
+            return False
+        d = str(date_str)[:10]
+        return start <= d <= end
+
+    # Load data
+    all_sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
+    all_items = supabase.table("sale_items").select("*").execute().data
+    all_expenses = supabase.table("expenses").select("*").execute().data
+
+    period_sales = [s for s in all_sales if in_range(s.get("created_at", ""))]
+
+    sale_ids = [s["id"] for s in period_sales]
+    period_items = [it for it in all_items if it.get("sale_id") in sale_ids]
+
+    # expenses: use expense_date field
+    period_expenses_list = [e for e in all_expenses if start <= str(e.get("expense_date", ""))[:10] <= end]
+    period_expenses = sum(float(e.get("amount", 0)) for e in period_expenses_list)
+
+    # totals
+    period_total = sum(float(s.get("total", 0)) for s in period_sales)
+    period_credit = sum(float(s.get("amount_on_credit", 0)) for s in period_sales)
+
+    # revenue and profit from sale_items
+    period_revenue = sum(float(it.get("line_total", 0)) for it in period_items)
+    period_cost = sum(float(it.get("cost_price", 0)) * float(it.get("quantity", 0)) for it in period_items)
+    period_gross_profit = period_revenue - period_cost
+    period_net_profit = period_gross_profit - period_expenses
+
+    # top materials in period
     product_stats = {}
-    for it in items:
+    for it in period_items:
         name = it.get("product_name", "Unknown")
         qty = float(it.get("quantity", 0))
         revenue = float(it.get("line_total", 0))
@@ -2410,21 +2434,46 @@ def reports(request: Request):
         product_stats[name]["profit"] += profit
 
     top = sorted(product_stats.items(), key=lambda x: x[1]["qty"], reverse=True)[:10]
-    top_rows = "".join(f"<tr><td>{name}</td><td>{data['qty']:.0f}</td><td>GHS {data['revenue']:,.2f}</td><td>GHS {data['profit']:,.2f}</td></tr>" for name, data in top)
+    top_rows = "".join(
+        f"<tr><td>{name}</td><td>{data['qty']:.0f}</td><td>GHS {data['revenue']:,.2f}</td><td>GHS {data['profit']:,.2f}</td></tr>"
+        for name, data in top
+    )
 
     recent_rows = ""
-    for s in sales[:20]:
+    for s in period_sales[:20]:
         cust = s.get("customer_name") or "Walk-in"
         recent_rows += f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>{cust}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>{s.get('cashier_name') or s.get('user_id','')}</td><td><a href='/receipt/{s['id']}' class='btn btn-small'>View</a></td></tr>"
-
-    net_profit = total_all - month_expenses
 
     body = f"""
     <h2>Reports</h2>
 
+    <div class="card date-bar">
+        <h3 style="margin-top:0;">📅 Select Period</h3>
+        <form method="get" action="/reports">
+            <div class="field">
+                <label>From</label>
+                <input type="date" name="start" value="{start}">
+            </div>
+            <div class="field">
+                <label>To</label>
+                <input type="date" name="end" value="{end}">
+            </div>
+            <button type="submit" class="btn">Apply</button>
+        </form>
+        <div class="quick-links">
+            <a href="/reports?preset=today" class="btn btn-quick">Today</a>
+            <a href="/reports?preset=week" class="btn btn-quick">Last 7 days</a>
+            <a href="/reports?preset=month" class="btn btn-quick">This Month</a>
+            <a href="/reports?preset=lastmonth" class="btn btn-quick">Last Month</a>
+            <a href="/reports?preset=year" class="btn btn-quick">This Year</a>
+            <a href="/reports?preset=all" class="btn btn-quick">All Time</a>
+        </div>
+    </div>
+
     <div class="card">
-        <h3>📥 Export Data to Excel</h3>
-        <a href="/export/sales" class="btn btn-success">📥 All Sales</a>
+        <span class="period-badge">📅 Period: {period_label}</span>
+        <h3 style="margin-top:10px;">📥 Export to Excel</h3>
+        <a href="/export/sales?start={start}&end={end}" class="btn btn-success">📥 Sales for this period</a>
         <a href="/export/products" class="btn btn-success">📥 All Materials</a>
         <a href="/export/stock" class="btn btn-success">📥 Stock Movements</a>
         <a href="/export/customers" class="btn btn-success">📥 Customers</a>
@@ -2432,39 +2481,42 @@ def reports(request: Request):
     </div>
 
     <div class="grid">
-        <div class="card stat"><div class="num">GHS {today_total:,.2f}</div><div class="label">Today</div></div>
-        <div class="card stat"><div class="num">GHS {week_total:,.2f}</div><div class="label">Last 7 days</div></div>
-        <div class="card stat"><div class="num">GHS {month_total:,.2f}</div><div class="label">Last 30 days</div></div>
-        <div class="card stat"><div class="num">GHS {total_all:,.2f}</div><div class="label">All time</div></div>
+        <div class="card stat"><div class="num">{len(period_sales)}</div><div class="label">Sales in Period</div></div>
+        <div class="card stat"><div class="num">GHS {period_total:,.2f}</div><div class="label">Total Revenue</div></div>
     </div>
 
     <div class="grid">
-        <div class="card stat"><div class="num" style="color:#dc2626;">GHS {total_credit:,.2f}</div><div class="label">Total on Credit</div></div>
-        <div class="card stat"><div class="num" style="color:#dc2626;">GHS {month_expenses:,.2f}</div><div class="label">Expenses (30 days)</div></div>
+        <div class="card stat"><div class="num" style="color:#dc2626;">GHS {period_credit:,.2f}</div><div class="label">On Credit</div></div>
+        <div class="card stat"><div class="num" style="color:#dc2626;">GHS {period_expenses:,.2f}</div><div class="label">Expenses</div></div>
     </div>
 
-    <div class="card {'profit-box' if net_profit >= 0 else 'loss-box'}">
-        <h3 style="margin:0;">{'💰 Net Profit' if net_profit >= 0 else '⚠️ Net Loss'} (all time)</h3>
-        <div class="big-num" style="color:{'#16a34a' if net_profit >= 0 else '#dc2626'};">GHS {net_profit:,.2f}</div>
-        <p style="text-align:center;color:#666;">Sales − Expenses (approximate)</p>
+    <div class="grid">
+        <div class="card stat"><div class="num" style="color:#16a34a;">GHS {period_gross_profit:,.2f}</div><div class="label">Gross Profit</div></div>
+        <div class="card stat"><div class="num" style="color:{'#16a34a' if period_net_profit >= 0 else '#dc2626'};">GHS {period_net_profit:,.2f}</div><div class="label">Net Profit</div></div>
+    </div>
+
+    <div class="card {'profit-box' if period_net_profit >= 0 else 'loss-box'}">
+        <h3 style="margin:0;">{'💰' if period_net_profit >= 0 else '⚠️'} {'Net Profit' if period_net_profit >= 0 else 'Net Loss'} for Period</h3>
+        <div class="big-num" style="color:{'#16a34a' if period_net_profit >= 0 else '#dc2626'};">GHS {period_net_profit:,.2f}</div>
+        <p style="text-align:center;color:#666;">Revenue − Cost of Goods − Expenses</p>
     </div>
 
     <div class="card">
-        <h3>🏆 Top Selling Materials</h3>
+        <h3>🏆 Top Selling Materials in Period</h3>
         <div class="table-wrap">
         <table>
             <tr><th>Material</th><th>Qty Sold</th><th>Revenue</th><th>Profit</th></tr>
-            {top_rows if top_rows else "<tr><td colspan='4'>No sales yet.</td></tr>"}
+            {top_rows if top_rows else "<tr><td colspan='4'>No sales in this period.</td></tr>"}
         </table>
         </div>
     </div>
 
     <div class="card">
-        <h3>🧾 Recent Sales (last 20)</h3>
+        <h3>🧾 Sales in Period ({len(period_sales)})</h3>
         <div class="table-wrap">
         <table>
             <tr><th>Date</th><th>Invoice</th><th>Customer</th><th>Total</th><th>Cashier</th><th></th></tr>
-            {recent_rows if recent_rows else "<tr><td colspan='6'>No sales yet.</td></tr>"}
+            {recent_rows if recent_rows else "<tr><td colspan='6'>No sales in this period.</td></tr>"}
         </table>
         </div>
     </div>
@@ -2483,14 +2535,23 @@ def style_header(ws, headers):
 
 
 @app.get("/export/sales")
-def export_sales(request: Request):
+def export_sales(request: Request, start: str = "", end: str = ""):
     username = get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=303)
     info = get_user_info(username)
     if not info or info.get("role") != "admin":
         raise HTTPException(403, "Only admins can export data")
-    sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
+
+    all_sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
+
+    if start and end:
+        sales = [s for s in all_sales if start <= str(s.get("created_at", ""))[:10] <= end]
+        fname_period = f"{start}_to_{end}"
+    else:
+        sales = all_sales
+        fname_period = datetime.now().strftime('%Y%m%d_%H%M')
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Sales"
@@ -2518,7 +2579,7 @@ def export_sales(request: Request):
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=OBOLO_sales_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
+        headers={"Content-Disposition": f"attachment; filename=OBOLO_sales_{fname_period}.xlsx"}
     )
 
 
