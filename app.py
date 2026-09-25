@@ -248,7 +248,6 @@ async def change_password(request: Request, current_password: str = Form(...), n
     if not username:
         return RedirectResponse("/login", status_code=303)
 
-    # Validate new passwords match
     if new_password != confirm_password:
         return RedirectResponse("/account?error=New+passwords+do+not+match", status_code=303)
 
@@ -258,15 +257,12 @@ async def change_password(request: Request, current_password: str = Form(...), n
     if new_password == current_password:
         return RedirectResponse("/account?error=New+password+must+be+different+from+current", status_code=303)
 
-    # Verify current password
     user_check = verify_login(username, current_password)
     if not user_check:
         return RedirectResponse("/account?error=Current+password+is+incorrect", status_code=303)
 
-    # Update password
     supabase.table("shop_users").update({"password": new_password}).eq("username", username).execute()
 
-    # Log the user out
     response = RedirectResponse("/login?error=Password+changed+successfully.+Please+log+in+again", status_code=303)
     response.delete_cookie(COOKIE_NAME)
     return response
@@ -634,6 +630,7 @@ def customer_view(request: Request, customer_id: int):
         <p><strong>Notes:</strong> {c.get('notes','') or '—'}</p>
         <h3>Current Balance: <span class="{'owed' if balance > 0 else 'clear'}">GHS {balance:,.2f}</span></h3>
         <a href="/customers/pay/{customer_id}" class="btn btn-success">💰 Record Payment</a>
+        <a href="/customers/statement/{customer_id}" class="btn">📄 Print Statement</a>
     </div>
     <div class="card">
         <h3>📋 Purchase History</h3>
@@ -658,6 +655,205 @@ def customer_view(request: Request, customer_id: int):
     </div>
     """
     return HTMLResponse(content=page("Customer", body, username, role))
+
+
+@app.get("/customers/statement/{customer_id}", response_class=HTMLResponse)
+def customer_statement(request: Request, customer_id: int, start: str = "", end: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    role = info.get("role", "cashier") if info else "cashier"
+
+    # default to current month
+    now = datetime.now()
+    if not start:
+        start = now.replace(day=1).strftime("%Y-%m-%d")
+    if not end:
+        end = now.strftime("%Y-%m-%d")
+
+    c = supabase.table("customers").select("*").eq("id", customer_id).single().execute().data
+    balance = float(c.get("balance", 0))
+
+    # get all sales and payments, then filter by date
+    all_sales = supabase.table("sales").select("*").eq("customer_id", customer_id).execute().data
+    all_payments = supabase.table("customer_payments").select("*").eq("customer_id", customer_id).execute().data
+
+    def in_range(date_str):
+        if not date_str:
+            return False
+        d = str(date_str)[:10]
+        return start <= d <= end
+
+    period_sales = [s for s in all_sales if in_range(s.get("created_at", ""))]
+    period_payments = [p for p in all_payments if in_range(p.get("created_at", ""))]
+
+    # build combined transaction list
+    transactions = []
+    for s in period_sales:
+        transactions.append({
+            "date": str(s.get("created_at", ""))[:10],
+            "type": "Sale",
+            "ref": s.get("invoice_no", ""),
+            "debit": float(s.get("total", 0)),
+            "credit": float(s.get("amount_paid_now", 0)) if float(s.get("amount_on_credit", 0)) > 0 else 0,
+            "note": "Purchase"
+        })
+    for p in period_payments:
+        transactions.append({
+            "date": str(p.get("created_at", ""))[:10],
+            "type": "Payment",
+            "ref": p.get("payment_method", ""),
+            "debit": 0,
+            "credit": float(p.get("amount", 0)),
+            "note": p.get("note", "") or "Payment received"
+        })
+
+    transactions.sort(key=lambda x: x["date"])
+
+    period_debit = sum(t["debit"] for t in transactions)
+    period_credit = sum(t["credit"] for t in transactions)
+
+    # calculate opening balance
+    opening_balance = 0.0
+    for s in all_sales:
+        d = str(s.get("created_at", ""))[:10]
+        if d < start:
+            opening_balance += float(s.get("amount_on_credit", 0))
+    for p in all_payments:
+        d = str(p.get("created_at", ""))[:10]
+        if d < start:
+            opening_balance -= float(p.get("amount", 0))
+
+    running = opening_balance
+    tx_rows = ""
+    if not transactions:
+        tx_rows = "<tr><td colspan='6' style='text-align:center;color:#666;'>No transactions in this period</td></tr>"
+    else:
+        for t in transactions:
+            running += t["debit"] - t["credit"]
+            debit_str = f"GHS {t['debit']:,.2f}" if t["debit"] > 0 else "—"
+            credit_str = f"GHS {t['credit']:,.2f}" if t["credit"] > 0 else "—"
+            tx_rows += f"""<tr>
+                <td>{t['date']}</td>
+                <td>{t['type']}</td>
+                <td>{t['ref']}</td>
+                <td style="text-align:right;">{debit_str}</td>
+                <td style="text-align:right;">{credit_str}</td>
+                <td style="text-align:right;">GHS {running:,.2f}</td>
+            </tr>"""
+
+    body = f"""
+    <div style="max-width:800px;margin:0 auto;">
+        <div class="card" id="statement" style="padding:30px;">
+            <!-- Header -->
+            <div style="text-align:center;border-bottom:3px solid #1e40af;padding-bottom:15px;margin-bottom:20px;">
+                <h1 style="color:#1e40af;margin:0;font-size:26px;">🏗️ {SHOP_NAME}</h1>
+                <p style="margin:5px 0 0 0;color:#666;">{SHOP_ADDRESS}</p>
+                <p style="margin:2px 0 0 0;color:#666;">📞 {SHOP_PHONE}</p>
+            </div>
+
+            <!-- Title -->
+            <h2 style="text-align:center;color:#1e40af;margin-top:0;">CUSTOMER STATEMENT</h2>
+
+            <!-- Statement period -->
+            <p style="text-align:center;color:#666;font-size:14px;">
+                Period: <strong>{start}</strong> to <strong>{end}</strong>
+            </p>
+
+            <!-- Customer info -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;">
+                <div>
+                    <p style="margin:5px 0;font-size:14px;"><strong>Customer:</strong> {c['name']}</p>
+                    <p style="margin:5px 0;font-size:14px;"><strong>Phone:</strong> {c.get('phone','') or '—'}</p>
+                    <p style="margin:5px 0;font-size:14px;"><strong>Address:</strong> {c.get('address','') or '—'}</p>
+                </div>
+                <div style="text-align:right;">
+                    <p style="margin:5px 0;font-size:14px;"><strong>Statement Date:</strong> {now.strftime('%d %B %Y')}</p>
+                    <p style="margin:5px 0;font-size:14px;"><strong>Prepared By:</strong> {username}</p>
+                </div>
+            </div>
+
+            <!-- Transaction table -->
+            <div class="table-wrap">
+            <table style="min-width:100%;font-size:14px;">
+                <thead>
+                    <tr style="background:#1e40af;color:white;">
+                        <th style="padding:10px;">Date</th>
+                        <th style="padding:10px;">Type</th>
+                        <th style="padding:10px;">Ref</th>
+                        <th style="padding:10px;text-align:right;">Debit (GHS)</th>
+                        <th style="padding:10px;text-align:right;">Credit (GHS)</th>
+                        <th style="padding:10px;text-align:right;">Balance</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr style="background:#f3f4f6;">
+                        <td style="padding:10px;">{start}</td>
+                        <td colspan="4" style="padding:10px;"><strong>Opening Balance</strong></td>
+                        <td style="padding:10px;text-align:right;"><strong>GHS {opening_balance:,.2f}</strong></td>
+                    </tr>
+                    {tx_rows}
+                    <tr style="background:#fef3c7;font-weight:bold;">
+                        <td colspan="3" style="padding:12px;text-align:right;">TOTALS:</td>
+                        <td style="padding:12px;text-align:right;">GHS {period_debit:,.2f}</td>
+                        <td style="padding:12px;text-align:right;">GHS {period_credit:,.2f}</td>
+                        <td style="padding:12px;text-align:right;">GHS {running:,.2f}</td>
+                    </tr>
+                </tbody>
+            </table>
+            </div>
+
+            <!-- Current balance -->
+            <div style="margin-top:25px;padding:20px;background:{'#fee2e2' if balance > 0 else '#dcfce7'};border-radius:8px;text-align:center;">
+                <p style="margin:0;font-size:14px;color:#666;">Current Balance Owed</p>
+                <p style="margin:10px 0 0 0;font-size:32px;font-weight:bold;color:{'#dc2626' if balance > 0 else '#16a34a'};">
+                    GHS {balance:,.2f}
+                </p>
+                {'<p style="margin:10px 0 0 0;font-size:14px;color:#991b1b;">Kindly settle this balance at your earliest convenience.</p>' if balance > 0 else '<p style="margin:10px 0 0 0;font-size:14px;color:#166534;">Thank you! Your account is up to date.</p>'}
+            </div>
+
+            <!-- Footer -->
+            <div style="margin-top:25px;padding-top:15px;border-top:1px solid #ddd;text-align:center;color:#666;font-size:13px;">
+                <p style="margin:5px 0;">This is a computer-generated statement. Please retain for your records.</p>
+                <p style="margin:5px 0;">For questions, call <strong>{SHOP_PHONE}</strong></p>
+                <p style="margin:15px 0 0 0;font-style:italic;">Thank you for your business!</p>
+            </div>
+        </div>
+
+        <!-- Action buttons (hidden when printing) -->
+        <div style="text-align:center;margin-top:15px;" class="no-print">
+            <button onclick="window.print()" class="btn btn-success">🖨️ Print Statement</button>
+            <a href="/customers/view/{customer_id}" class="btn">← Back to Customer</a>
+        </div>
+
+        <!-- Custom date range form (hidden when printing) -->
+        <div class="card no-print" style="margin-top:15px;">
+            <h3>📅 Change Period</h3>
+            <form method="get" action="/customers/statement/{customer_id}" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                <div style="flex:1;min-width:150px;">
+                    <label>Start Date</label>
+                    <input type="date" name="start" value="{start}">
+                </div>
+                <div style="flex:1;min-width:150px;">
+                    <label>End Date</label>
+                    <input type="date" name="end" value="{end}">
+                </div>
+                <button type="submit" class="btn">Update Statement</button>
+            </form>
+        </div>
+    </div>
+
+    <style>
+    @media print {{
+        .header, .btn, button, .no-print {{ display: none !important; }}
+        body {{ background: white; }}
+        .card {{ box-shadow: none; padding: 0; }}
+        @page {{ margin: 1cm; }}
+    }}
+    </style>
+    """
+    return HTMLResponse(content=page("Statement", body, username, role))
 
 
 @app.get("/customers/pay/{customer_id}", response_class=HTMLResponse)
