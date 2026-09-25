@@ -263,6 +263,184 @@ def logout(request: Request):
     return response
 
 
+# ============ ACTIVITY LOG ============
+
+@app.get("/activity", response_class=HTMLResponse)
+def activity_page(request: Request, user_filter: str = "", type_filter: str = "", severity_filter: str = "", start: str = "", end: str = "", search: str = ""):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can view activity log")
+
+    logs = supabase.table("activity_log").select("*").order("created_at", desc=True).limit(500).execute().data
+
+    filtered = []
+    for lg in logs:
+        if user_filter and lg.get("username") != user_filter:
+            continue
+        if type_filter and lg.get("action_type") != type_filter:
+            continue
+        if severity_filter and lg.get("severity") != severity_filter:
+            continue
+        if start:
+            d = str(lg.get("created_at", ""))[:10]
+            if d < start:
+                continue
+        if end:
+            d = str(lg.get("created_at", ""))[:10]
+            if d > end:
+                continue
+        if search:
+            search_lower = search.lower()
+            if search_lower not in str(lg.get("description", "")).lower() and search_lower not in str(lg.get("username", "")).lower():
+                continue
+        filtered.append(lg)
+
+    all_users = sorted(set(lg.get("username", "") for lg in logs if lg.get("username")))
+    all_types = sorted(set(lg.get("action_type", "") for lg in logs if lg.get("action_type")))
+
+    total_logs = len(logs)
+    failed_logins = len([lg for lg in logs if lg.get("action_type") == "login_failed"])
+    deletions = len([lg for lg in logs if lg.get("action_type") in ["material_delete", "expense_delete"]])
+    price_changes = len([lg for lg in logs if lg.get("action_type") == "price_change"])
+
+    user_options = "".join(f"<option value='{u}' {'selected' if u==user_filter else ''}>{u}</option>" for u in all_users)
+    type_options = "".join(f"<option value='{t}' {'selected' if t==type_filter else ''}>{t.replace('_', ' ').title()}</option>" for t in all_types)
+
+    rows = ""
+    for lg in filtered:
+        sev = lg.get("severity", "info")
+        badge_class = f"badge-{sev}"
+        icon = {"info": "ℹ️", "warning": "⚠️", "danger": "🚨"}.get(sev, "ℹ️")
+        dt = str(lg.get("created_at", ""))[:19].replace("T", " ")
+        rows += f"""<tr>
+            <td><small>{dt}</small></td>
+            <td><strong>{lg.get('username', 'unknown')}</strong></td>
+            <td><span class="badge {badge_class}">{icon} {lg.get('action_type', '').replace('_', ' ').title()}</span></td>
+            <td>{lg.get('description', '')}</td>
+        </tr>"""
+
+    body = f"""
+    <h2>📝 Activity Log</h2>
+
+    <div class="grid">
+        <div class="card stat"><div class="num">{total_logs}</div><div class="label">Total Events (last 500)</div></div>
+        <div class="card stat"><div class="num" style="color:#dc2626;">{failed_logins}</div><div class="label">Failed Logins</div></div>
+    </div>
+
+    <div class="grid">
+        <div class="card stat"><div class="num" style="color:#dc2626;">{deletions}</div><div class="label">Deletions</div></div>
+        <div class="card stat"><div class="num" style="color:#d97706;">{price_changes}</div><div class="label">Price Changes</div></div>
+    </div>
+
+    <div class="card">
+        <h3>🔍 Filters</h3>
+        <form method="get" action="/activity">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:150px;">
+                    <label>User</label>
+                    <select name="user_filter">
+                        <option value="">All Users</option>
+                        {user_options}
+                    </select>
+                </div>
+                <div style="flex:1;min-width:150px;">
+                    <label>Action Type</label>
+                    <select name="type_filter">
+                        <option value="">All Types</option>
+                        {type_options}
+                    </select>
+                </div>
+                <div style="flex:1;min-width:150px;">
+                    <label>Severity</label>
+                    <select name="severity_filter">
+                        <option value="">All</option>
+                        <option value="info" {'selected' if severity_filter=='info' else ''}>Info</option>
+                        <option value="warning" {'selected' if severity_filter=='warning' else ''}>Warning</option>
+                        <option value="danger" {'selected' if severity_filter=='danger' else ''}>Danger</option>
+                    </select>
+                </div>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;">
+                <div style="flex:1;min-width:150px;">
+                    <label>From</label>
+                    <input type="date" name="start" value="{start}">
+                </div>
+                <div style="flex:1;min-width:150px;">
+                    <label>To</label>
+                    <input type="date" name="end" value="{end}">
+                </div>
+                <div style="flex:1;min-width:200px;">
+                    <label>Search</label>
+                    <input type="text" name="search" value="{search}" placeholder="Search description...">
+                </div>
+            </div>
+            <div style="margin-top:10px;">
+                <button type="submit" class="btn">Apply Filters</button>
+                <a href="/activity" class="btn btn-quick">Clear</a>
+                <a href="/export/activity" class="btn btn-success">📥 Export to Excel</a>
+            </div>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3>📋 Events ({len(filtered)})</h3>
+        <div class="table-wrap">
+        <table>
+            <tr><th>When</th><th>User</th><th>Action</th><th>Details</th></tr>
+            {rows if rows else "<tr><td colspan='4'>No events match your filters.</td></tr>"}
+        </table>
+        </div>
+        <p style="margin-top:15px;color:#666;font-size:13px;">
+            ℹ️ Info &nbsp;·&nbsp; ⚠️ Warning &nbsp;·&nbsp; 🚨 Danger &nbsp;·&nbsp; Showing latest 500 events
+        </p>
+    </div>
+    """
+    return HTMLResponse(content=page("Activity", body, username, info.get("role")))
+
+
+@app.get("/export/activity")
+def export_activity(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can export activity log")
+
+    logs = supabase.table("activity_log").select("*").order("created_at", desc=True).limit(5000).execute().data
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Activity Log"
+    headers = ["When", "User", "Action", "Severity", "Description"]
+    style_header(ws, headers)
+
+    for lg in logs:
+        ws.append([
+            str(lg.get("created_at", ""))[:19].replace("T", " "),
+            lg.get("username", ""),
+            lg.get("action_type", ""),
+            lg.get("severity", ""),
+            lg.get("description", ""),
+        ])
+
+    widths = [22, 15, 22, 12, 70]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=OBOLO_activity_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
+    )
+
+
 # ============ MY ACCOUNT ============
 
 @app.get("/account", response_class=HTMLResponse)
@@ -294,13 +472,10 @@ def my_account(request: Request, msg: str = "", error: str = ""):
         <form method="post" action="/account/change-password">
             <label>Current Password</label>
             <input type="password" name="current_password" required autocomplete="current-password">
-
             <label>New Password (min 4 characters)</label>
             <input type="password" name="new_password" required minlength="4" autocomplete="new-password">
-
             <label>Confirm New Password</label>
             <input type="password" name="confirm_password" required minlength="4" autocomplete="new-password">
-
             <button type="submit" class="btn btn-success">🔐 Change Password</button>
             <a href="/" class="btn">Cancel</a>
         </form>
@@ -311,8 +486,8 @@ def my_account(request: Request, msg: str = "", error: str = ""):
         <ul>
             <li>Choose a password that is hard for others to guess</li>
             <li>Don't use your name, phone number, or birthday</li>
-            <li>After changing your password, you'll be logged out and must log in again with the new password</li>
-            <li>If you forget your password, ask the admin to reset it from the Users page</li>
+            <li>After changing your password, you'll be logged out</li>
+            <li>If you forget your password, ask the admin to reset it</li>
         </ul>
     </div>
     """
@@ -433,24 +608,12 @@ def home(request: Request):
 
         chart_section = f"""
         <div class="grid">
-            <div class="card">
-                <h3>📈 Daily Sales — Last 30 Days</h3>
-                <div class="chart-container"><canvas id="dailyChart"></canvas></div>
-            </div>
-            <div class="card">
-                <h3>🥧 Payment Methods (All Time)</h3>
-                <div class="chart-container"><canvas id="paymentChart"></canvas></div>
-            </div>
+            <div class="card"><h3>📈 Daily Sales — Last 30 Days</h3><div class="chart-container"><canvas id="dailyChart"></canvas></div></div>
+            <div class="card"><h3>🥧 Payment Methods (All Time)</h3><div class="chart-container"><canvas id="paymentChart"></canvas></div></div>
         </div>
         <div class="grid">
-            <div class="card">
-                <h3>📊 Top 10 Materials by Revenue</h3>
-                <div class="chart-container"><canvas id="topChart"></canvas></div>
-            </div>
-            <div class="card">
-                <h3>📉 Monthly Sales — Last 6 Months</h3>
-                <div class="chart-container"><canvas id="monthlyChart"></canvas></div>
-            </div>
+            <div class="card"><h3>📊 Top 10 Materials by Revenue</h3><div class="chart-container"><canvas id="topChart"></canvas></div></div>
+            <div class="card"><h3>📉 Monthly Sales — Last 6 Months</h3><div class="chart-container"><canvas id="monthlyChart"></canvas></div></div>
         </div>
         """
 
@@ -471,19 +634,16 @@ def home(request: Request):
             data: {{ labels: dailyLabels, datasets: [{{ label: 'Sales (GHS)', data: dailyData, borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.1)', fill: true, tension: 0.3, pointRadius: 2 }}] }},
             options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }}
         }});
-
         new Chart(document.getElementById('paymentChart'), {{
             type: 'doughnut',
             data: {{ labels: payLabels, datasets: [{{ data: payData, backgroundColor: ['#1e40af','#16a34a','#d97706','#dc2626','#7c3aed','#0891b2'] }}] }},
             options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ position: 'bottom' }} }} }}
         }});
-
         new Chart(document.getElementById('topChart'), {{
             type: 'bar',
             data: {{ labels: topLabels, datasets: [{{ label: 'Revenue (GHS)', data: topData, backgroundColor: '#1e40af' }}] }},
             options: {{ indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ beginAtZero: true }} }} }}
         }});
-
         new Chart(document.getElementById('monthlyChart'), {{
             type: 'bar',
             data: {{ labels: monLabels, datasets: [{{ label: 'Sales (GHS)', data: monData, backgroundColor: '#16a34a' }}] }},
@@ -683,19 +843,12 @@ async def edit_product(request: Request, product_id: int, name: str = Form(...),
     supabase.table("products").update(data).eq("id", product_id).execute()
 
     if abs(selling_price - old_price) > 0.001:
-        log(username, "price_change",
-            f"Changed SELLING price of '{name}' from GHS {old_price:,.2f} to GHS {selling_price:,.2f}",
-            "warning")
+        log(username, "price_change", f"Changed SELLING price of '{name}' from GHS {old_price:,.2f} to GHS {selling_price:,.2f}", "warning")
     if abs(cost_price - old_cost) > 0.001:
-        log(username, "cost_change",
-            f"Changed COST price of '{name}' from GHS {old_cost:,.2f} to GHS {cost_price:,.2f}",
-            "warning")
-
+        log(username, "cost_change", f"Changed COST price of '{name}' from GHS {old_cost:,.2f} to GHS {cost_price:,.2f}", "warning")
     if abs(quantity_in_stock - old_qty) > 0.001:
         supabase.table("stock_movements").insert({"product_id": product_id, "movement_type": "ADJUSTMENT", "quantity": quantity_in_stock - old_qty, "note": f"Manual edit by {username}"}).execute()
-        log(username, "stock_adjust",
-            f"Adjusted stock of '{name}' from {old_qty} to {quantity_in_stock} (change: {quantity_in_stock - old_qty})",
-            "warning")
+        log(username, "stock_adjust", f"Adjusted stock of '{name}' from {old_qty} to {quantity_in_stock}", "warning")
 
     log(username, "material_edit", f"Edited material '{name}' (SKU: {sku})", "info")
     return RedirectResponse("/products", status_code=303)
@@ -784,10 +937,7 @@ def pnl_report(request: Request, start: str = "", end: str = "", preset: str = "
 
     expense_rows = ""
     for cat, amt in sorted(expense_by_cat.items(), key=lambda x: -x[1]):
-        expense_rows += f"""<tr>
-            <td class="label-col">&nbsp;&nbsp;&nbsp;{cat}</td>
-            <td class="amount-col">GHS {amt:,.2f}</td>
-        </tr>"""
+        expense_rows += f'<tr><td class="label-col">&nbsp;&nbsp;&nbsp;{cat}</td><td class="amount-col">GHS {amt:,.2f}</td></tr>'
     if not expense_rows:
         expense_rows = '<tr><td class="label-col" colspan="2" style="text-align:center;color:#666;">No expenses in this period</td></tr>'
 
@@ -810,79 +960,40 @@ def pnl_report(request: Request, start: str = "", end: str = "", preset: str = "
             <a href="/pnl?preset=all" class="btn btn-quick">All Time</a>
         </div>
     </div>
-
     <div class="card" style="max-width:850px;margin:0 auto;padding:35px;">
         <div style="text-align:center;border-bottom:3px solid #1e40af;padding-bottom:15px;margin-bottom:25px;">
             <h1 style="color:#1e40af;margin:0;font-size:26px;">🏗️ {SHOP_NAME}</h1>
             <p style="margin:5px 0 0 0;color:#666;">{SHOP_ADDRESS}</p>
             <p style="margin:2px 0 0 0;color:#666;">📞 {SHOP_PHONE}</p>
         </div>
-
         <h2 style="text-align:center;color:#1e40af;margin-top:0;">PROFIT & LOSS STATEMENT</h2>
-        <p style="text-align:center;color:#666;font-size:14px;margin-bottom:25px;">
-            Period: <strong>{start}</strong> to <strong>{end}</strong>
-        </p>
-
+        <p style="text-align:center;color:#666;font-size:14px;margin-bottom:25px;">Period: <strong>{start}</strong> to <strong>{end}</strong></p>
         <table class="pnl-table">
-            <tr class="pnl-section-header">
-                <td class="label-col">REVENUE</td>
-                <td class="amount-col">AMOUNT (GHS)</td>
-            </tr>
-            <tr>
-                <td class="label-col">&nbsp;&nbsp;&nbsp;Total Sales Revenue ({len(period_sales)} sales)</td>
-                <td class="amount-col">{revenue:,.2f}</td>
-            </tr>
-            <tr class="pnl-subtotal">
-                <td class="label-col">TOTAL REVENUE</td>
-                <td class="amount-col">{revenue:,.2f}</td>
-            </tr>
-            <tr class="pnl-section-header">
-                <td class="label-col">COST OF GOODS SOLD</td>
-                <td class="amount-col"></td>
-            </tr>
-            <tr>
-                <td class="label-col">&nbsp;&nbsp;&nbsp;Cost of materials sold</td>
-                <td class="amount-col">({cogs:,.2f})</td>
-            </tr>
-            <tr class="pnl-subtotal">
-                <td class="label-col">GROSS PROFIT</td>
-                <td class="amount-col">{gross_profit:,.2f}</td>
-            </tr>
-            <tr>
-                <td class="label-col" style="color:#666;font-size:13px;">&nbsp;&nbsp;&nbsp;Gross Margin: {gross_margin_pct:.1f}%</td>
-                <td class="amount-col"></td>
-            </tr>
-            <tr class="pnl-section-header">
-                <td class="label-col">OPERATING EXPENSES</td>
-                <td class="amount-col"></td>
-            </tr>
+            <tr class="pnl-section-header"><td class="label-col">REVENUE</td><td class="amount-col">AMOUNT (GHS)</td></tr>
+            <tr><td class="label-col">&nbsp;&nbsp;&nbsp;Total Sales Revenue ({len(period_sales)} sales)</td><td class="amount-col">{revenue:,.2f}</td></tr>
+            <tr class="pnl-subtotal"><td class="label-col">TOTAL REVENUE</td><td class="amount-col">{revenue:,.2f}</td></tr>
+            <tr class="pnl-section-header"><td class="label-col">COST OF GOODS SOLD</td><td class="amount-col"></td></tr>
+            <tr><td class="label-col">&nbsp;&nbsp;&nbsp;Cost of materials sold</td><td class="amount-col">({cogs:,.2f})</td></tr>
+            <tr class="pnl-subtotal"><td class="label-col">GROSS PROFIT</td><td class="amount-col">{gross_profit:,.2f}</td></tr>
+            <tr><td class="label-col" style="color:#666;font-size:13px;">&nbsp;&nbsp;&nbsp;Gross Margin: {gross_margin_pct:.1f}%</td><td class="amount-col"></td></tr>
+            <tr class="pnl-section-header"><td class="label-col">OPERATING EXPENSES</td><td class="amount-col"></td></tr>
             {expense_rows}
-            <tr class="pnl-subtotal">
-                <td class="label-col">TOTAL EXPENSES</td>
-                <td class="amount-col">({total_expenses:,.2f})</td>
-            </tr>
-            <tr class="pnl-final {net_class}">
-                <td class="label-col">{net_label}</td>
-                <td class="amount-col">GHS {net_profit:,.2f}</td>
-            </tr>
+            <tr class="pnl-subtotal"><td class="label-col">TOTAL EXPENSES</td><td class="amount-col">({total_expenses:,.2f})</td></tr>
+            <tr class="pnl-final {net_class}"><td class="label-col">{net_label}</td><td class="amount-col">GHS {net_profit:,.2f}</td></tr>
         </table>
-
         <div style="margin-top:20px;text-align:center;color:#666;font-size:13px;">
             <p style="margin:5px 0;">Net Profit Margin: <strong>{net_margin_pct:.1f}%</strong></p>
         </div>
-
         <div style="margin-top:30px;padding-top:15px;border-top:1px solid #ddd;text-align:center;color:#666;font-size:12px;">
             <p style="margin:5px 0;">Generated on {now.strftime('%d %B %Y at %H:%M')} by {username}</p>
             <p style="margin:5px 0;">This is a computer-generated statement.</p>
         </div>
     </div>
-
     <div class="card no-print" style="text-align:center;">
         <button onclick="window.print()" class="btn btn-success">🖨️ Print P&L Statement</button>
         <a href="/export/pnl?start={start}&end={end}" class="btn btn-success">📥 Export to Excel</a>
         <a href="/reports" class="btn">← Back to Reports</a>
     </div>
-
     <style>
     @media print {{
         .header, .btn, button, .no-print {{ display: none !important; }}
@@ -940,7 +1051,6 @@ def export_pnl(request: Request, start: str = "", end: str = ""):
     wb = Workbook()
     ws = wb.active
     ws.title = "Profit and Loss"
-
     ws.append([SHOP_NAME])
     ws.append(["PROFIT & LOSS STATEMENT"])
     ws.append([f"Period: {start} to {end}"])
@@ -1041,11 +1151,7 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
         margin_pct = (profit_per_unit / sell * 100) if sell > 0 else 0
         stat = sold_stats.get(p["id"], {"qty": 0, "revenue": 0, "cost": 0})
         total_profit = stat["revenue"] - stat["cost"]
-        rows_data.append({
-            "id": p["id"], "name": p["name"], "sku": p.get("sku", ""), "unit": p.get("unit", ""),
-            "cost": cost, "sell": sell, "profit_per_unit": profit_per_unit, "margin_pct": margin_pct,
-            "qty_sold": stat["qty"], "revenue": stat["revenue"], "total_profit": total_profit,
-        })
+        rows_data.append({"id": p["id"], "name": p["name"], "sku": p.get("sku", ""), "unit": p.get("unit", ""), "cost": cost, "sell": sell, "profit_per_unit": profit_per_unit, "margin_pct": margin_pct, "qty_sold": stat["qty"], "revenue": stat["revenue"], "total_profit": total_profit})
 
     if filter_type == "profit":
         rows_data = [r for r in rows_data if r["profit_per_unit"] > 0]
@@ -1069,7 +1175,6 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
     avg_margin = (sum(r["margin_pct"] for r in rows_data) / len(rows_data)) if rows_data else 0
     profitable_count = sum(1 for r in rows_data if r["profit_per_unit"] > 0)
     loss_count = sum(1 for r in rows_data if r["profit_per_unit"] <= 0)
-
     best = max(rows_data, key=lambda x: x["margin_pct"], default=None)
     worst = min(rows_data, key=lambda x: x["margin_pct"], default=None)
 
@@ -1134,12 +1239,10 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
     </div>
     <div class="card">
         <h3>📊 Materials List ({len(rows_data)})</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Material</th><th>Unit</th><th>Cost</th><th>Price</th><th>Profit/Unit</th><th>Margin %</th><th>Qty Sold</th><th>Total Profit</th></tr>
             {rows if rows else "<tr><td colspan='8'>No materials match this filter.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
         <p style="margin-top:15px;color:#666;font-size:13px;">🟢 30%+ margin · 🟡 10–29% margin · 🔴 Below 10% or loss</p>
     </div>
     """
@@ -1177,7 +1280,6 @@ def export_margins(request: Request):
     ws.title = "Profit Margins"
     headers = ["Material", "SKU", "Unit", "Cost", "Price", "Profit/Unit", "Margin %", "Qty Sold", "Revenue", "Total Profit"]
     style_header(ws, headers)
-
     for p in products:
         cost = float(p.get("cost_price", 0))
         sell = float(p.get("selling_price", 0))
@@ -1243,12 +1345,10 @@ def customers_list(request: Request, search: str = ""):
         </form>
     </div>
     <div class="card">
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Customer</th><th>Address</th><th>Balance Owed</th><th>Actions</th></tr>
             {rows if rows else "<tr><td colspan='4'>No customers yet.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
     """
     return HTMLResponse(content=page("Customers", body, username, role))
@@ -2134,7 +2234,6 @@ def daily_summary(request: Request):
 
     today = datetime.now().date()
     sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
-
     today_sales = [s for s in sales if parse_dt(s.get("created_at", "")) and parse_dt(s.get("created_at", "")).date() == today]
 
     total_today = 0.0
@@ -2482,7 +2581,6 @@ def receipt(request: Request, sale_id: int):
     if float(sale.get("amount_on_credit", 0)) > 0:
         credit_line = f'<p style="text-align:right;color:#dc2626;">On Credit: GHS {float(sale.get("amount_on_credit", 0)):,.2f}</p>'
 
-    # Build plain text receipt for WhatsApp / SMS
     text_lines = [
         f"🏗️ {SHOP_NAME}",
         f"{SHOP_ADDRESS}",
@@ -2511,7 +2609,6 @@ def receipt(request: Request, sale_id: int):
     text_receipt = "\n".join(text_lines)
     encoded_text = urllib.parse.quote(text_receipt)
 
-    # Customer phone (if registered)
     customer_phone = ""
     if sale.get("customer_id"):
         try:
