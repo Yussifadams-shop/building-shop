@@ -1,5 +1,6 @@
 import os
 import json
+import urllib.parse
 from datetime import datetime, timedelta
 from io import BytesIO
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -150,7 +151,6 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 
 .chart-container {{ position: relative; height: 300px; margin-top: 10px; }}
 
-/* Scanner & barcode styles */
 #reader {{ width: 100%; max-width: 500px; margin: 0 auto; border-radius: 8px; overflow: hidden; }}
 .scan-result {{ padding: 15px; border-radius: 8px; margin-top: 15px; font-size: 16px; text-align: center; }}
 .scan-success {{ background: #dcfce7; border: 2px solid #16a34a; color: #166534; }}
@@ -263,184 +263,6 @@ def logout(request: Request):
     return response
 
 
-# ============ ACTIVITY LOG ============
-
-@app.get("/activity", response_class=HTMLResponse)
-def activity_page(request: Request, user_filter: str = "", type_filter: str = "", severity_filter: str = "", start: str = "", end: str = "", search: str = ""):
-    username = get_current_user(request)
-    if not username:
-        return RedirectResponse("/login", status_code=303)
-    info = get_user_info(username)
-    if not info or info.get("role") != "admin":
-        raise HTTPException(403, "Only admins can view activity log")
-
-    logs = supabase.table("activity_log").select("*").order("created_at", desc=True).limit(500).execute().data
-
-    filtered = []
-    for lg in logs:
-        if user_filter and lg.get("username") != user_filter:
-            continue
-        if type_filter and lg.get("action_type") != type_filter:
-            continue
-        if severity_filter and lg.get("severity") != severity_filter:
-            continue
-        if start:
-            d = str(lg.get("created_at", ""))[:10]
-            if d < start:
-                continue
-        if end:
-            d = str(lg.get("created_at", ""))[:10]
-            if d > end:
-                continue
-        if search:
-            search_lower = search.lower()
-            if search_lower not in str(lg.get("description", "")).lower() and search_lower not in str(lg.get("username", "")).lower():
-                continue
-        filtered.append(lg)
-
-    all_users = sorted(set(lg.get("username", "") for lg in logs if lg.get("username")))
-    all_types = sorted(set(lg.get("action_type", "") for lg in logs if lg.get("action_type")))
-
-    total_logs = len(logs)
-    failed_logins = len([lg for lg in logs if lg.get("action_type") == "login_failed"])
-    deletions = len([lg for lg in logs if lg.get("action_type") in ["material_delete", "expense_delete"]])
-    price_changes = len([lg for lg in logs if lg.get("action_type") == "price_change"])
-
-    user_options = "".join(f"<option value='{u}' {'selected' if u==user_filter else ''}>{u}</option>" for u in all_users)
-    type_options = "".join(f"<option value='{t}' {'selected' if t==type_filter else ''}>{t.replace('_', ' ').title()}</option>" for t in all_types)
-
-    rows = ""
-    for lg in filtered:
-        sev = lg.get("severity", "info")
-        badge_class = f"badge-{sev}"
-        icon = {"info": "ℹ️", "warning": "⚠️", "danger": "🚨"}.get(sev, "ℹ️")
-        dt = str(lg.get("created_at", ""))[:19].replace("T", " ")
-        rows += f"""<tr>
-            <td><small>{dt}</small></td>
-            <td><strong>{lg.get('username', 'unknown')}</strong></td>
-            <td><span class="badge {badge_class}">{icon} {lg.get('action_type', '').replace('_', ' ').title()}</span></td>
-            <td>{lg.get('description', '')}</td>
-        </tr>"""
-
-    body = f"""
-    <h2>📝 Activity Log</h2>
-
-    <div class="grid">
-        <div class="card stat"><div class="num">{total_logs}</div><div class="label">Total Events (last 500)</div></div>
-        <div class="card stat"><div class="num" style="color:#dc2626;">{failed_logins}</div><div class="label">Failed Logins</div></div>
-    </div>
-
-    <div class="grid">
-        <div class="card stat"><div class="num" style="color:#dc2626;">{deletions}</div><div class="label">Deletions</div></div>
-        <div class="card stat"><div class="num" style="color:#d97706;">{price_changes}</div><div class="label">Price Changes</div></div>
-    </div>
-
-    <div class="card">
-        <h3>🔍 Filters</h3>
-        <form method="get" action="/activity">
-            <div style="display:flex;gap:10px;flex-wrap:wrap;">
-                <div style="flex:1;min-width:150px;">
-                    <label>User</label>
-                    <select name="user_filter">
-                        <option value="">All Users</option>
-                        {user_options}
-                    </select>
-                </div>
-                <div style="flex:1;min-width:150px;">
-                    <label>Action Type</label>
-                    <select name="type_filter">
-                        <option value="">All Types</option>
-                        {type_options}
-                    </select>
-                </div>
-                <div style="flex:1;min-width:150px;">
-                    <label>Severity</label>
-                    <select name="severity_filter">
-                        <option value="">All</option>
-                        <option value="info" {'selected' if severity_filter=='info' else ''}>Info</option>
-                        <option value="warning" {'selected' if severity_filter=='warning' else ''}>Warning</option>
-                        <option value="danger" {'selected' if severity_filter=='danger' else ''}>Danger</option>
-                    </select>
-                </div>
-            </div>
-            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;">
-                <div style="flex:1;min-width:150px;">
-                    <label>From</label>
-                    <input type="date" name="start" value="{start}">
-                </div>
-                <div style="flex:1;min-width:150px;">
-                    <label>To</label>
-                    <input type="date" name="end" value="{end}">
-                </div>
-                <div style="flex:1;min-width:200px;">
-                    <label>Search</label>
-                    <input type="text" name="search" value="{search}" placeholder="Search description...">
-                </div>
-            </div>
-            <div style="margin-top:10px;">
-                <button type="submit" class="btn">Apply Filters</button>
-                <a href="/activity" class="btn btn-quick">Clear</a>
-                <a href="/export/activity" class="btn btn-success">📥 Export to Excel</a>
-            </div>
-        </form>
-    </div>
-
-    <div class="card">
-        <h3>📋 Events ({len(filtered)})</h3>
-        <div class="table-wrap">
-        <table>
-            <tr><th>When</th><th>User</th><th>Action</th><th>Details</th></tr>
-            {rows if rows else "<tr><td colspan='4'>No events match your filters.</td></tr>"}
-        </table>
-        </div>
-        <p style="margin-top:15px;color:#666;font-size:13px;">
-            ℹ️ Info &nbsp;·&nbsp; ⚠️ Warning &nbsp;·&nbsp; 🚨 Danger &nbsp;·&nbsp; Showing latest 500 events
-        </p>
-    </div>
-    """
-    return HTMLResponse(content=page("Activity", body, username, info.get("role")))
-
-
-@app.get("/export/activity")
-def export_activity(request: Request):
-    username = get_current_user(request)
-    if not username:
-        return RedirectResponse("/login", status_code=303)
-    info = get_user_info(username)
-    if not info or info.get("role") != "admin":
-        raise HTTPException(403, "Only admins can export activity log")
-
-    logs = supabase.table("activity_log").select("*").order("created_at", desc=True).limit(5000).execute().data
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Activity Log"
-    headers = ["When", "User", "Action", "Severity", "Description"]
-    style_header(ws, headers)
-
-    for lg in logs:
-        ws.append([
-            str(lg.get("created_at", ""))[:19].replace("T", " "),
-            lg.get("username", ""),
-            lg.get("action_type", ""),
-            lg.get("severity", ""),
-            lg.get("description", ""),
-        ])
-
-    widths = [22, 15, 22, 12, 70]
-    for i, w in enumerate(widths, 1):
-        ws.column_dimensions[chr(64 + i)].width = w
-
-    stream = BytesIO()
-    wb.save(stream)
-    stream.seek(0)
-    return StreamingResponse(
-        stream,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=OBOLO_activity_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
-    )
-
-
 # ============ MY ACCOUNT ============
 
 @app.get("/account", response_class=HTMLResponse)
@@ -539,7 +361,7 @@ def save_cart(cart):
     return response
 
 
-# ============ DASHBOARD (with charts) ============
+# ============ DASHBOARD ============
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
@@ -646,45 +468,25 @@ def home(request: Request):
 
         new Chart(document.getElementById('dailyChart'), {{
             type: 'line',
-            data: {{
-                labels: dailyLabels,
-                datasets: [{{
-                    label: 'Sales (GHS)',
-                    data: dailyData,
-                    borderColor: '#1e40af',
-                    backgroundColor: 'rgba(30,64,175,0.1)',
-                    fill: true,
-                    tension: 0.3,
-                    pointRadius: 2
-                }}]
-            }},
+            data: {{ labels: dailyLabels, datasets: [{{ label: 'Sales (GHS)', data: dailyData, borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.1)', fill: true, tension: 0.3, pointRadius: 2 }}] }},
             options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }}
         }});
 
         new Chart(document.getElementById('paymentChart'), {{
             type: 'doughnut',
-            data: {{
-                labels: payLabels,
-                datasets: [{{ data: payData, backgroundColor: ['#1e40af','#16a34a','#d97706','#dc2626','#7c3aed','#0891b2'] }}]
-            }},
+            data: {{ labels: payLabels, datasets: [{{ data: payData, backgroundColor: ['#1e40af','#16a34a','#d97706','#dc2626','#7c3aed','#0891b2'] }}] }},
             options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ position: 'bottom' }} }} }}
         }});
 
         new Chart(document.getElementById('topChart'), {{
             type: 'bar',
-            data: {{
-                labels: topLabels,
-                datasets: [{{ label: 'Revenue (GHS)', data: topData, backgroundColor: '#1e40af' }}]
-            }},
+            data: {{ labels: topLabels, datasets: [{{ label: 'Revenue (GHS)', data: topData, backgroundColor: '#1e40af' }}] }},
             options: {{ indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ beginAtZero: true }} }} }}
         }});
 
         new Chart(document.getElementById('monthlyChart'), {{
             type: 'bar',
-            data: {{
-                labels: monLabels,
-                datasets: [{{ label: 'Sales (GHS)', data: monData, backgroundColor: '#16a34a' }}]
-            }},
+            data: {{ labels: monLabels, datasets: [{{ label: 'Sales (GHS)', data: monData, backgroundColor: '#16a34a' }}] }},
             options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }}
         }});
         </script>
@@ -996,14 +798,8 @@ def pnl_report(request: Request, start: str = "", end: str = "", preset: str = "
     <div class="card date-bar no-print">
         <h3 style="margin-top:0;">📅 Select Period</h3>
         <form method="get" action="/pnl">
-            <div class="field">
-                <label>From</label>
-                <input type="date" name="start" value="{start}">
-            </div>
-            <div class="field">
-                <label>To</label>
-                <input type="date" name="end" value="{end}">
-            </div>
+            <div class="field"><label>From</label><input type="date" name="start" value="{start}"></div>
+            <div class="field"><label>To</label><input type="date" name="end" value="{end}"></div>
             <button type="submit" class="btn">Apply</button>
         </form>
         <div class="quick-links" style="margin-top:10px;">
@@ -1040,7 +836,6 @@ def pnl_report(request: Request, start: str = "", end: str = "", preset: str = "
                 <td class="label-col">TOTAL REVENUE</td>
                 <td class="amount-col">{revenue:,.2f}</td>
             </tr>
-
             <tr class="pnl-section-header">
                 <td class="label-col">COST OF GOODS SOLD</td>
                 <td class="amount-col"></td>
@@ -1057,7 +852,6 @@ def pnl_report(request: Request, start: str = "", end: str = "", preset: str = "
                 <td class="label-col" style="color:#666;font-size:13px;">&nbsp;&nbsp;&nbsp;Gross Margin: {gross_margin_pct:.1f}%</td>
                 <td class="amount-col"></td>
             </tr>
-
             <tr class="pnl-section-header">
                 <td class="label-col">OPERATING EXPENSES</td>
                 <td class="amount-col"></td>
@@ -1067,7 +861,6 @@ def pnl_report(request: Request, start: str = "", end: str = "", preset: str = "
                 <td class="label-col">TOTAL EXPENSES</td>
                 <td class="amount-col">({total_expenses:,.2f})</td>
             </tr>
-
             <tr class="pnl-final {net_class}">
                 <td class="label-col">{net_label}</td>
                 <td class="amount-col">GHS {net_profit:,.2f}</td>
@@ -1152,7 +945,6 @@ def export_pnl(request: Request, start: str = "", end: str = ""):
     ws.append(["PROFIT & LOSS STATEMENT"])
     ws.append([f"Period: {start} to {end}"])
     ws.append([])
-
     ws["A1"].font = Font(bold=True, size=14)
     ws["A2"].font = Font(bold=True, size=12)
 
@@ -1247,22 +1039,12 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
         sell = float(p.get("selling_price", 0))
         profit_per_unit = sell - cost
         margin_pct = (profit_per_unit / sell * 100) if sell > 0 else 0
-
         stat = sold_stats.get(p["id"], {"qty": 0, "revenue": 0, "cost": 0})
         total_profit = stat["revenue"] - stat["cost"]
-
         rows_data.append({
-            "id": p["id"],
-            "name": p["name"],
-            "sku": p.get("sku", ""),
-            "unit": p.get("unit", ""),
-            "cost": cost,
-            "sell": sell,
-            "profit_per_unit": profit_per_unit,
-            "margin_pct": margin_pct,
-            "qty_sold": stat["qty"],
-            "revenue": stat["revenue"],
-            "total_profit": total_profit,
+            "id": p["id"], "name": p["name"], "sku": p.get("sku", ""), "unit": p.get("unit", ""),
+            "cost": cost, "sell": sell, "profit_per_unit": profit_per_unit, "margin_pct": margin_pct,
+            "qty_sold": stat["qty"], "revenue": stat["revenue"], "total_profit": total_profit,
         })
 
     if filter_type == "profit":
@@ -1299,7 +1081,6 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
             margin_class = "ok-margin"
         else:
             margin_class = "bad-margin"
-
         rows += f"""<tr>
             <td><strong>{r['name']}</strong><br><small>{r['sku']}</small></td>
             <td>{r['unit']}</td>
@@ -1311,31 +1092,20 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
             <td>GHS {r['total_profit']:,.2f}</td>
         </tr>"""
 
-    best_html = ""
-    if best:
-        best_html = f"<p><strong>🏆 Best Margin:</strong> {best['name']} — <span class='good-margin'>{best['margin_pct']:.1f}%</span></p>"
-    worst_html = ""
-    if worst:
-        worst_html = f"<p><strong>⚠️ Lowest Margin:</strong> {worst['name']} — <span class='bad-margin'>{worst['margin_pct']:.1f}%</span></p>"
+    best_html = f"<p><strong>🏆 Best Margin:</strong> {best['name']} — <span class='good-margin'>{best['margin_pct']:.1f}%</span></p>" if best else ""
+    worst_html = f"<p><strong>⚠️ Lowest Margin:</strong> {worst['name']} — <span class='bad-margin'>{worst['margin_pct']:.1f}%</span></p>" if worst else ""
 
     body = f"""
     <h2>📈 Profit Margins per Material</h2>
-
     <div class="grid">
         <div class="card stat"><div class="num">{total_materials}</div><div class="label">Total Materials</div></div>
         <div class="card stat"><div class="num">{avg_margin:.1f}%</div><div class="label">Average Margin</div></div>
     </div>
-
     <div class="grid">
         <div class="card stat"><div class="num" style="color:#16a34a;">{profitable_count}</div><div class="label">Profitable Items</div></div>
         <div class="card stat"><div class="num" style="color:#dc2626;">{loss_count}</div><div class="label">Loss / No Profit</div></div>
     </div>
-
-    <div class="card">
-        {best_html}
-        {worst_html}
-    </div>
-
+    <div class="card">{best_html}{worst_html}</div>
     <div class="card">
         <h3>🎛️ Filters & Sort</h3>
         <form method="get" action="/margins" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
@@ -1362,27 +1132,15 @@ def margins_page(request: Request, filter_type: str = "all", sort_by: str = "mar
             <a href="/export/margins" class="btn btn-success">📥 Export Excel</a>
         </form>
     </div>
-
     <div class="card">
         <h3>📊 Materials List ({len(rows_data)})</h3>
         <div class="table-wrap">
         <table>
-            <tr>
-                <th>Material</th>
-                <th>Unit</th>
-                <th>Cost</th>
-                <th>Price</th>
-                <th>Profit/Unit</th>
-                <th>Margin %</th>
-                <th>Qty Sold</th>
-                <th>Total Profit</th>
-            </tr>
+            <tr><th>Material</th><th>Unit</th><th>Cost</th><th>Price</th><th>Profit/Unit</th><th>Margin %</th><th>Qty Sold</th><th>Total Profit</th></tr>
             {rows if rows else "<tr><td colspan='8'>No materials match this filter.</td></tr>"}
         </table>
         </div>
-        <p style="margin-top:15px;color:#666;font-size:13px;">
-            🟢 30%+ margin &nbsp;·&nbsp; 🟡 10–29% margin &nbsp;·&nbsp; 🔴 Below 10% or loss
-        </p>
+        <p style="margin-top:15px;color:#666;font-size:13px;">🟢 30%+ margin · 🟡 10–29% margin · 🔴 Below 10% or loss</p>
     </div>
     """
     return HTMLResponse(content=page("Margins", body, username, info.get("role")))
@@ -1427,19 +1185,7 @@ def export_margins(request: Request):
         margin_pct = (profit_per_unit / sell * 100) if sell > 0 else 0
         stat = sold_stats.get(p["id"], {"qty": 0, "revenue": 0, "cost": 0})
         total_profit = stat["revenue"] - stat["cost"]
-
-        ws.append([
-            p.get("name", ""),
-            p.get("sku", ""),
-            p.get("unit", ""),
-            cost,
-            sell,
-            profit_per_unit,
-            round(margin_pct, 1),
-            stat["qty"],
-            stat["revenue"],
-            total_profit,
-        ])
+        ws.append([p.get("name", ""), p.get("sku", ""), p.get("unit", ""), cost, sell, profit_per_unit, round(margin_pct, 1), stat["qty"], stat["revenue"], total_profit])
 
     widths = [30, 15, 10, 12, 12, 14, 12, 12, 14, 14]
     for i, w in enumerate(widths, 1):
@@ -1488,12 +1234,8 @@ def customers_list(request: Request, search: str = ""):
 
     body = f"""
     <h2>👥 Customers</h2>
-    <div class="card">
-        <h3>Total Owed: <span style="color:#dc2626;">GHS {total_owed:,.2f}</span></h3>
-    </div>
-    <div class="card">
-        <a href="/customers/add" class="btn btn-success">➕ Add Customer</a>
-    </div>
+    <div class="card"><h3>Total Owed: <span style="color:#dc2626;">GHS {total_owed:,.2f}</span></h3></div>
+    <div class="card"><a href="/customers/add" class="btn btn-success">➕ Add Customer</a></div>
     <div class="card">
         <form method="get" style="display:flex;gap:10px;flex-wrap:wrap;">
             <input type="text" name="search" placeholder="Search by name..." value="{search}" style="flex:1;min-width:200px;">
@@ -1544,14 +1286,7 @@ async def customer_add(request: Request, name: str = Form(...), phone: str = For
     username = get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=303)
-    supabase.table("customers").insert({
-        "name": name,
-        "phone": phone or None,
-        "address": address or None,
-        "notes": notes or None,
-        "balance": 0,
-        "is_active": True
-    }).execute()
+    supabase.table("customers").insert({"name": name, "phone": phone or None, "address": address or None, "notes": notes or None, "balance": 0, "is_active": True}).execute()
     log(username, "customer_add", f"Added new customer '{name}' (Phone: {phone or '—'})", "info")
     return RedirectResponse("/customers", status_code=303)
 
@@ -1568,14 +1303,10 @@ def customer_view(request: Request, customer_id: int):
     balance = float(c.get("balance", 0))
 
     sales = supabase.table("sales").select("*").eq("customer_id", customer_id).order("created_at", desc=True).execute().data
-    sales_rows = ""
-    for s in sales:
-        sales_rows += f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>GHS {float(s.get('amount_paid_now',0)):,.2f}</td><td>GHS {float(s.get('amount_on_credit',0)):,.2f}</td></tr>"
+    sales_rows = "".join(f"<tr><td>{s.get('created_at','')[:16]}</td><td>{s.get('invoice_no','')}</td><td>GHS {float(s.get('total',0)):,.2f}</td><td>GHS {float(s.get('amount_paid_now',0)):,.2f}</td><td>GHS {float(s.get('amount_on_credit',0)):,.2f}</td></tr>" for s in sales)
 
     payments = supabase.table("customer_payments").select("*").eq("customer_id", customer_id).order("created_at", desc=True).execute().data
-    pay_rows = ""
-    for p in payments:
-        pay_rows += f"<tr><td>{p.get('created_at','')[:16]}</td><td>GHS {float(p.get('amount',0)):,.2f}</td><td>{p.get('payment_method','')}</td><td>{p.get('note','') or ''}</td></tr>"
+    pay_rows = "".join(f"<tr><td>{p.get('created_at','')[:16]}</td><td>GHS {float(p.get('amount',0)):,.2f}</td><td>{p.get('payment_method','')}</td><td>{p.get('note','') or ''}</td></tr>" for p in payments)
 
     body = f"""
     <h2>👤 {c['name']}</h2>
@@ -1589,25 +1320,19 @@ def customer_view(request: Request, customer_id: int):
     </div>
     <div class="card">
         <h3>📋 Purchase History</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Date</th><th>Invoice</th><th>Total</th><th>Paid</th><th>Credit</th></tr>
             {sales_rows if sales_rows else "<tr><td colspan='5'>No purchases yet.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
     <div class="card">
         <h3>💵 Payment History</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Date</th><th>Amount</th><th>Method</th><th>Note</th></tr>
             {pay_rows if pay_rows else "<tr><td colspan='4'>No payments yet.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
-    <div class="card">
-        <a href="/customers" class="btn">← Back to Customers</a>
-    </div>
+    <div class="card"><a href="/customers" class="btn">← Back to Customers</a></div>
     """
     return HTMLResponse(content=page("Customer", body, username, role))
 
@@ -1643,21 +1368,9 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
 
     transactions = []
     for s in period_sales:
-        transactions.append({
-            "date": str(s.get("created_at", ""))[:10],
-            "type": "Sale",
-            "ref": s.get("invoice_no", ""),
-            "debit": float(s.get("total", 0)),
-            "credit": float(s.get("amount_paid_now", 0)) if float(s.get("amount_on_credit", 0)) > 0 else 0,
-        })
+        transactions.append({"date": str(s.get("created_at", ""))[:10], "type": "Sale", "ref": s.get("invoice_no", ""), "debit": float(s.get("total", 0)), "credit": float(s.get("amount_paid_now", 0)) if float(s.get("amount_on_credit", 0)) > 0 else 0})
     for p in period_payments:
-        transactions.append({
-            "date": str(p.get("created_at", ""))[:10],
-            "type": "Payment",
-            "ref": p.get("payment_method", ""),
-            "debit": 0,
-            "credit": float(p.get("amount", 0)),
-        })
+        transactions.append({"date": str(p.get("created_at", ""))[:10], "type": "Payment", "ref": p.get("payment_method", ""), "debit": 0, "credit": float(p.get("amount", 0))})
 
     transactions.sort(key=lambda x: x["date"])
     period_debit = sum(t["debit"] for t in transactions)
@@ -1682,14 +1395,7 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
             running += t["debit"] - t["credit"]
             debit_str = f"GHS {t['debit']:,.2f}" if t["debit"] > 0 else "—"
             credit_str = f"GHS {t['credit']:,.2f}" if t["credit"] > 0 else "—"
-            tx_rows += f"""<tr>
-                <td>{t['date']}</td>
-                <td>{t['type']}</td>
-                <td>{t['ref']}</td>
-                <td style="text-align:right;">{debit_str}</td>
-                <td style="text-align:right;">{credit_str}</td>
-                <td style="text-align:right;">GHS {running:,.2f}</td>
-            </tr>"""
+            tx_rows += f"<tr><td>{t['date']}</td><td>{t['type']}</td><td>{t['ref']}</td><td style='text-align:right;'>{debit_str}</td><td style='text-align:right;'>{credit_str}</td><td style='text-align:right;'>GHS {running:,.2f}</td></tr>"
 
     body = f"""
     <div style="max-width:800px;margin:0 auto;">
@@ -1699,10 +1405,8 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
                 <p style="margin:5px 0 0 0;color:#666;">{SHOP_ADDRESS}</p>
                 <p style="margin:2px 0 0 0;color:#666;">📞 {SHOP_PHONE}</p>
             </div>
-
             <h2 style="text-align:center;color:#1e40af;margin-top:0;">CUSTOMER STATEMENT</h2>
             <p style="text-align:center;color:#666;font-size:14px;">Period: <strong>{start}</strong> to <strong>{end}</strong></p>
-
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;">
                 <div>
                     <p style="margin:5px 0;font-size:14px;"><strong>Customer:</strong> {c['name']}</p>
@@ -1714,7 +1418,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
                     <p style="margin:5px 0;font-size:14px;"><strong>Prepared By:</strong> {username}</p>
                 </div>
             </div>
-
             <div class="table-wrap">
             <table style="min-width:100%;font-size:14px;">
                 <thead>
@@ -1743,36 +1446,24 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
                 </tbody>
             </table>
             </div>
-
             <div style="margin-top:25px;padding:20px;background:{'#fee2e2' if balance > 0 else '#dcfce7'};border-radius:8px;text-align:center;">
                 <p style="margin:0;font-size:14px;color:#666;">Current Balance Owed</p>
-                <p style="margin:10px 0 0 0;font-size:32px;font-weight:bold;color:{'#dc2626' if balance > 0 else '#16a34a'};">
-                    GHS {balance:,.2f}
-                </p>
+                <p style="margin:10px 0 0 0;font-size:32px;font-weight:bold;color:{'#dc2626' if balance > 0 else '#16a34a'};">GHS {balance:,.2f}</p>
             </div>
-
             <div style="margin-top:25px;padding-top:15px;border-top:1px solid #ddd;text-align:center;color:#666;font-size:13px;">
                 <p style="margin:5px 0;">This is a computer-generated statement. Please retain for your records.</p>
                 <p style="margin:5px 0;">For questions, call <strong>{SHOP_PHONE}</strong></p>
             </div>
         </div>
-
         <div style="text-align:center;margin-top:15px;" class="no-print">
             <button onclick="window.print()" class="btn btn-success">🖨️ Print Statement</button>
             <a href="/customers/view/{customer_id}" class="btn">← Back to Customer</a>
         </div>
-
         <div class="card no-print" style="margin-top:15px;">
             <h3>📅 Change Period</h3>
             <form method="get" action="/customers/statement/{customer_id}" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
-                <div style="flex:1;min-width:150px;">
-                    <label>Start Date</label>
-                    <input type="date" name="start" value="{start}">
-                </div>
-                <div style="flex:1;min-width:150px;">
-                    <label>End Date</label>
-                    <input type="date" name="end" value="{end}">
-                </div>
+                <div style="flex:1;min-width:150px;"><label>Start Date</label><input type="date" name="start" value="{start}"></div>
+                <div style="flex:1;min-width:150px;"><label>End Date</label><input type="date" name="end" value="{end}"></div>
                 <button type="submit" class="btn">Update Statement</button>
             </form>
         </div>
@@ -1827,13 +1518,7 @@ async def customer_pay(request: Request, customer_id: int, amount: float = Form(
     new_balance = balance - amount
 
     supabase.table("customers").update({"balance": new_balance}).eq("id", customer_id).execute()
-    supabase.table("customer_payments").insert({
-        "customer_id": customer_id,
-        "amount": amount,
-        "payment_method": payment_method,
-        "note": note or None,
-        "recorded_by": username
-    }).execute()
+    supabase.table("customer_payments").insert({"customer_id": customer_id, "amount": amount, "payment_method": payment_method, "note": note or None, "recorded_by": username}).execute()
 
     log(username, "customer_payment", f"Recorded payment of GHS {amount:,.2f} from customer '{c.get('name','')}' via {payment_method}", "info")
     return RedirectResponse(f"/customers/view/{customer_id}", status_code=303)
@@ -1894,12 +1579,10 @@ def suppliers_list(request: Request, search: str = ""):
         </form>
     </div>
     <div class="card">
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Supplier</th><th>Address</th><th>Orders</th><th>Total Spent</th><th>Actions</th></tr>
             {rows if rows else "<tr><td colspan='5'>No suppliers yet. Add one to start tracking purchases.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
     """
     return HTMLResponse(content=page("Suppliers", body, username, role))
@@ -1943,14 +1626,7 @@ async def supplier_add(request: Request, name: str = Form(...), phone: str = For
     info = get_user_info(username)
     if not info or info.get("role") != "admin":
         raise HTTPException(403, "Only admins can add suppliers")
-    supabase.table("suppliers").insert({
-        "name": name,
-        "phone": phone or None,
-        "email": email or None,
-        "address": address or None,
-        "notes": notes or None,
-        "is_active": True
-    }).execute()
+    supabase.table("suppliers").insert({"name": name, "phone": phone or None, "email": email or None, "address": address or None, "notes": notes or None, "is_active": True}).execute()
     log(username, "supplier_add", f"Added new supplier '{name}' (Phone: {phone or '—'})", "info")
     return RedirectResponse("/suppliers", status_code=303)
 
@@ -1970,13 +1646,7 @@ def supplier_view(request: Request, supplier_id: int):
     total_spent = 0
     for po in purchases:
         total_spent += float(po.get("total", 0))
-        rows += f"""<tr>
-            <td>{po.get('created_at','')[:16]}</td>
-            <td>{po.get('po_number','')}</td>
-            <td>GHS {float(po.get('total',0)):,.2f}</td>
-            <td>{po.get('payment_method','')}</td>
-            <td><a href='/purchases/view/{po['id']}' class='btn btn-small'>View</a></td>
-        </tr>"""
+        rows += f"<tr><td>{po.get('created_at','')[:16]}</td><td>{po.get('po_number','')}</td><td>GHS {float(po.get('total',0)):,.2f}</td><td>{po.get('payment_method','')}</td><td><a href='/purchases/view/{po['id']}' class='btn btn-small'>View</a></td></tr>"
 
     body = f"""
     <h2>🚚 {s['name']}</h2>
@@ -1990,16 +1660,12 @@ def supplier_view(request: Request, supplier_id: int):
     </div>
     <div class="card">
         <h3>📋 Purchase History ({len(purchases)})</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Date</th><th>PO Number</th><th>Total</th><th>Payment</th><th></th></tr>
             {rows if rows else "<tr><td colspan='5'>No purchases yet.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
-    <div class="card">
-        <a href="/suppliers" class="btn">← Back to Suppliers</a>
-    </div>
+    <div class="card"><a href="/suppliers" class="btn">← Back to Suppliers</a></div>
     """
     return HTMLResponse(content=page("Supplier", body, username, role))
 
@@ -2019,14 +1685,7 @@ def purchases_list(request: Request):
     total_all = 0
     for po in purchases:
         total_all += float(po.get("total", 0))
-        rows += f"""<tr>
-            <td>{po.get('created_at','')[:16]}</td>
-            <td>{po.get('po_number','')}</td>
-            <td>{po.get('supplier_name','')}</td>
-            <td>GHS {float(po.get('total',0)):,.2f}</td>
-            <td>{po.get('payment_method','')}</td>
-            <td><a href='/purchases/view/{po['id']}' class='btn btn-small'>View</a></td>
-        </tr>"""
+        rows += f"<tr><td>{po.get('created_at','')[:16]}</td><td>{po.get('po_number','')}</td><td>{po.get('supplier_name','')}</td><td>GHS {float(po.get('total',0)):,.2f}</td><td>{po.get('payment_method','')}</td><td><a href='/purchases/view/{po['id']}' class='btn btn-small'>View</a></td></tr>"
 
     body = f"""
     <h2>📦 Purchase Orders</h2>
@@ -2034,16 +1693,12 @@ def purchases_list(request: Request):
         <a href="/purchases/new" class="btn btn-success">➕ Record New Purchase</a>
         <a href="/suppliers" class="btn">🚚 Suppliers</a>
     </div>
+    <div class="card"><h3>Total Spent: <span style="color:#dc2626;">GHS {total_all:,.2f}</span> ({len(purchases)} orders)</h3></div>
     <div class="card">
-        <h3>Total Spent: <span style="color:#dc2626;">GHS {total_all:,.2f}</span> ({len(purchases)} orders)</h3>
-    </div>
-    <div class="card">
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Date</th><th>PO Number</th><th>Supplier</th><th>Total</th><th>Payment</th><th></th></tr>
             {rows if rows else "<tr><td colspan='6'>No purchases yet.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
     """
     return HTMLResponse(content=page("Purchases", body, username, role))
@@ -2059,46 +1714,30 @@ def purchase_new_form(request: Request, supplier_id: str = ""):
         raise HTTPException(403, "Only admins can record purchases")
 
     suppliers = supabase.table("suppliers").select("*").order("name").execute().data
-    sup_options = "".join(
-        f"<option value='{s['id']}' {'selected' if str(s['id'])==str(supplier_id) else ''}>{s['name']}</option>"
-        for s in suppliers
-    )
+    sup_options = "".join(f"<option value='{s['id']}' {'selected' if str(s['id'])==str(supplier_id) else ''}>{s['name']}</option>" for s in suppliers)
 
     products = supabase.table("products").select("*").eq("is_active", True).order("name").execute().data
-    prod_options = "".join(
-        f"<option value='{p['id']}' data-cost='{p.get('cost_price',0)}'>{p['name']} ({p.get('unit','')})</option>"
-        for p in products
-    )
+    prod_options = "".join(f"<option value='{p['id']}' data-cost='{p.get('cost_price',0)}'>{p['name']} ({p.get('unit','')})</option>" for p in products)
 
     body = f"""
     <h2>📦 Record New Purchase</h2>
     <div class="card">
         <form method="post" action="/purchases/new">
             <label>Supplier</label>
-            <select name="supplier_id" required>
-                <option value="">-- Select supplier --</option>
-                {sup_options}
-            </select>
-
+            <select name="supplier_id" required><option value="">-- Select supplier --</option>{sup_options}</select>
             <h3>Items Purchased</h3>
             <p style="color:#666;font-size:14px;">Add each item you bought. Stock will be updated automatically.</p>
-
             <div id="items-container">
                 <div class="item-row" style="border:1px solid #ddd;padding:15px;border-radius:8px;margin-bottom:10px;">
                     <label>Material</label>
-                    <select name="product_id[]" required>
-                        <option value="">-- Select material --</option>
-                        {prod_options}
-                    </select>
+                    <select name="product_id[]" required><option value="">-- Select material --</option>{prod_options}</select>
                     <label>Quantity</label>
                     <input type="number" step="0.01" name="quantity[]" required min="0.01">
                     <label>Unit Cost (GHS)</label>
                     <input type="number" step="0.01" name="unit_cost[]" required min="0.01">
                 </div>
             </div>
-
             <button type="button" onclick="addItem()" class="btn">➕ Add Another Item</button>
-
             <h3 style="margin-top:20px;">Payment</h3>
             <label>Payment Method</label>
             <select name="payment_method">
@@ -2108,18 +1747,14 @@ def purchase_new_form(request: Request, supplier_id: str = ""):
                 <option value="Card">💳 Card</option>
                 <option value="Credit">📝 Credit (I Owe Supplier)</option>
             </select>
-
             <label>Amount Paid Now</label>
             <input type="number" step="0.01" name="amount_paid" value="0" min="0">
-
             <label>Note (optional)</label>
             <input type="text" name="note">
-
             <button type="submit" class="btn btn-success">✅ Save Purchase</button>
             <a href="/purchases" class="btn">Cancel</a>
         </form>
     </div>
-
     <script>
     function addItem() {{
         var container = document.getElementById('items-container');
@@ -2172,7 +1807,6 @@ async def purchase_new(request: Request):
         cost = float(unit_costs[i])
         line = qty * cost
         total += line
-
         product = supabase.table("products").select("*").eq("id", pid).single().execute().data
         items.append({"product_id": pid, "product_name": product["name"], "quantity": qty, "unit_cost": cost, "line_total": line})
 
@@ -2186,46 +1820,16 @@ async def purchase_new(request: Request):
             credit_amount = 0
 
     po_number = f"PO-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    po_data = {
-        "po_number": po_number,
-        "supplier_id": int(supplier_id),
-        "supplier_name": supplier_name,
-        "total": total,
-        "amount_paid": amount_paid if payment_method == "Credit" else total,
-        "amount_owed": credit_amount,
-        "payment_method": payment_method,
-        "status": "received",
-        "note": note or None,
-        "recorded_by": username
-    }
+    po_data = {"po_number": po_number, "supplier_id": int(supplier_id), "supplier_name": supplier_name, "total": total, "amount_paid": amount_paid if payment_method == "Credit" else total, "amount_owed": credit_amount, "payment_method": payment_method, "status": "received", "note": note or None, "recorded_by": username}
     result = supabase.table("purchase_orders").insert(po_data).execute()
     purchase_id = result.data[0]["id"]
 
     for it in items:
-        supabase.table("purchase_order_items").insert({
-            "purchase_id": purchase_id,
-            "product_id": it["product_id"],
-            "product_name": it["product_name"],
-            "quantity": it["quantity"],
-            "unit_cost": it["unit_cost"],
-            "line_total": it["line_total"]
-        }).execute()
-
+        supabase.table("purchase_order_items").insert({"purchase_id": purchase_id, "product_id": it["product_id"], "product_name": it["product_name"], "quantity": it["quantity"], "unit_cost": it["unit_cost"], "line_total": it["line_total"]}).execute()
         p = supabase.table("products").select("*").eq("id", it["product_id"]).single().execute().data
         new_qty = float(p.get("quantity_in_stock", 0)) + it["quantity"]
-        supabase.table("products").update({
-            "quantity_in_stock": new_qty,
-            "cost_price": it["unit_cost"]
-        }).eq("id", it["product_id"]).execute()
-
-        supabase.table("stock_movements").insert({
-            "product_id": it["product_id"],
-            "movement_type": "IN",
-            "quantity": it["quantity"],
-            "unit_cost": it["unit_cost"],
-            "reference": po_number,
-            "note": f"Purchase from {supplier_name} — {it['product_name']} x {it['quantity']}"
-        }).execute()
+        supabase.table("products").update({"quantity_in_stock": new_qty, "cost_price": it["unit_cost"]}).eq("id", it["product_id"]).execute()
+        supabase.table("stock_movements").insert({"product_id": it["product_id"], "movement_type": "IN", "quantity": it["quantity"], "unit_cost": it["unit_cost"], "reference": po_number, "note": f"Purchase from {supplier_name} — {it['product_name']} x {it['quantity']}"}).execute()
 
     log(username, "purchase_add", f"Recorded purchase from '{supplier_name}' - Total GHS {total:,.2f} ({len(items)} items)", "info")
     return RedirectResponse(f"/purchases/view/{purchase_id}", status_code=303)
@@ -2242,9 +1846,7 @@ def purchase_view(request: Request, purchase_id: int):
     po = supabase.table("purchase_orders").select("*").eq("id", purchase_id).single().execute().data
     items = supabase.table("purchase_order_items").select("*").eq("purchase_id", purchase_id).execute().data
 
-    rows = ""
-    for it in items:
-        rows += f"<tr><td>{it['product_name']}</td><td>{it['quantity']}</td><td>GHS {float(it['unit_cost']):,.2f}</td><td>GHS {float(it['line_total']):,.2f}</td></tr>"
+    rows = "".join(f"<tr><td>{it['product_name']}</td><td>{it['quantity']}</td><td>GHS {float(it['unit_cost']):,.2f}</td><td>GHS {float(it['line_total']):,.2f}</td></tr>" for it in items)
 
     body = f"""
     <div class="card">
@@ -2253,12 +1855,10 @@ def purchase_view(request: Request, purchase_id: int):
         <p><strong>Date:</strong> {po.get('created_at','')[:16]}</p>
         <p><strong>Recorded by:</strong> {po.get('recorded_by','')}</p>
         <hr>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Item</th><th>Qty</th><th>Unit Cost</th><th>Total</th></tr>
             {rows}
-        </table>
-        </div>
+        </table></div>
         <hr>
         <h3 style="text-align:right;">Total: GHS {float(po['total']):,.2f}</h3>
         <p style="text-align:right;">Paid: GHS {float(po.get('amount_paid', 0)):,.2f}</p>
@@ -2292,12 +1892,7 @@ def expenses_list(request: Request, month: str = ""):
     if not month:
         month = now.strftime("%Y-%m")
 
-    filtered = []
-    for e in expenses:
-        d = str(e.get("expense_date", ""))[:7]
-        if d == month:
-            filtered.append(e)
-
+    filtered = [e for e in expenses if str(e.get("expense_date", ""))[:7] == month]
     total_month = sum(float(e.get("amount", 0)) for e in filtered)
 
     cat_totals = {}
@@ -2305,17 +1900,15 @@ def expenses_list(request: Request, month: str = ""):
         cat = e.get("category_name", "Unknown")
         cat_totals[cat] = cat_totals.get(cat, 0) + float(e.get("amount", 0))
 
-    rows = ""
-    for e in filtered:
-        rows += f"""<tr>
-            <td>{e.get('expense_date','')}</td>
-            <td>{e.get('category_name','')}</td>
-            <td>GHS {float(e.get('amount',0)):,.2f}</td>
-            <td>{e.get('description','') or ''}</td>
-            <td>{e.get('paid_to','') or ''}</td>
-            <td>{e.get('payment_method','')}</td>
-            <td><a href='/expenses/delete/{e['id']}' class='btn btn-danger btn-small' onclick="return confirm('Delete this expense?')">🗑️</a></td>
-        </tr>"""
+    rows = "".join(f"""<tr>
+        <td>{e.get('expense_date','')}</td>
+        <td>{e.get('category_name','')}</td>
+        <td>GHS {float(e.get('amount',0)):,.2f}</td>
+        <td>{e.get('description','') or ''}</td>
+        <td>{e.get('paid_to','') or ''}</td>
+        <td>{e.get('payment_method','')}</td>
+        <td><a href='/expenses/delete/{e['id']}' class='btn btn-danger btn-small' onclick="return confirm('Delete this expense?')">🗑️</a></td>
+    </tr>""" for e in filtered)
 
     cat_rows = ""
     for cat, amt in sorted(cat_totals.items(), key=lambda x: -x[1]):
@@ -2343,21 +1936,17 @@ def expenses_list(request: Request, month: str = ""):
     </div>
     <div class="card">
         <h3>📊 Breakdown by Category</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Category</th><th>Amount</th><th>% of Total</th></tr>
             {cat_rows if cat_rows else "<tr><td colspan='3'>No expenses this month.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
     <div class="card">
         <h3>📋 All Expenses ({len(filtered)})</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Date</th><th>Category</th><th>Amount</th><th>Description</th><th>Paid To</th><th>Method</th><th></th></tr>
             {rows if rows else "<tr><td colspan='7'>No expenses this month.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
     """
     return HTMLResponse(content=page("Expenses", body, username, role))
@@ -2417,16 +2006,7 @@ async def expense_new(request: Request, expense_date: str = Form(...), category_
     cat = supabase.table("expense_categories").select("*").eq("id", int(category_id)).single().execute().data
     cat_name = cat["name"] if cat else "Unknown"
 
-    supabase.table("expenses").insert({
-        "expense_date": expense_date,
-        "category_id": int(category_id),
-        "category_name": cat_name,
-        "amount": amount,
-        "description": description or None,
-        "paid_to": paid_to or None,
-        "payment_method": payment_method,
-        "recorded_by": username
-    }).execute()
+    supabase.table("expenses").insert({"expense_date": expense_date, "category_id": int(category_id), "category_name": cat_name, "amount": amount, "description": description or None, "paid_to": paid_to or None, "payment_method": payment_method, "recorded_by": username}).execute()
 
     log(username, "expense_add", f"Added expense: '{cat_name}' GHS {amount:,.2f} - {description or 'no description'}", "info")
     return RedirectResponse("/expenses", status_code=303)
@@ -2467,15 +2047,7 @@ def expenses_export(request: Request, month: str = ""):
     headers = ["Date", "Category", "Amount", "Description", "Paid To", "Payment Method", "Recorded By"]
     style_header(ws, headers)
     for e in expenses:
-        ws.append([
-            str(e.get("expense_date", "")),
-            e.get("category_name", ""),
-            float(e.get("amount", 0)),
-            e.get("description", "") or "",
-            e.get("paid_to", "") or "",
-            e.get("payment_method", ""),
-            e.get("recorded_by", "") or "",
-        ])
+        ws.append([str(e.get("expense_date", "")), e.get("category_name", ""), float(e.get("amount", 0)), e.get("description", "") or "", e.get("paid_to", "") or "", e.get("payment_method", ""), e.get("recorded_by", "") or ""])
 
     widths = [15, 15, 12, 30, 20, 15, 15]
     for i, w in enumerate(widths, 1):
@@ -2515,27 +2087,8 @@ def alerts_page(request: Request):
 
     low_stock.sort(key=lambda p: float(p.get("quantity_in_stock", 0)))
 
-    out_rows = ""
-    for p in out_of_stock:
-        out_rows += f"""<tr>
-            <td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td>
-            <td>{p.get('unit','')}</td>
-            <td class='low'>0</td>
-            <td>{p.get('reorder_level', 0)}</td>
-            <td><a href='/purchases/new' class='btn btn-success btn-small'>📦 Restock</a></td>
-        </tr>"""
-
-    low_rows = ""
-    for p in low_stock:
-        qty = float(p.get("quantity_in_stock", 0))
-        reorder = float(p.get("reorder_level", 0))
-        low_rows += f"""<tr>
-            <td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td>
-            <td>{p.get('unit','')}</td>
-            <td class='low'>{qty}</td>
-            <td>{reorder}</td>
-            <td><a href='/purchases/new' class='btn btn-success btn-small'>📦 Restock</a></td>
-        </tr>"""
+    out_rows = "".join(f"<tr><td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td><td>{p.get('unit','')}</td><td class='low'>0</td><td>{p.get('reorder_level', 0)}</td><td><a href='/purchases/new' class='btn btn-success btn-small'>📦 Restock</a></td></tr>" for p in out_of_stock)
+    low_rows = "".join(f"<tr><td><strong>{p['name']}</strong><br><small>{p.get('sku','')}</small></td><td>{p.get('unit','')}</td><td class='low'>{p.get('quantity_in_stock', 0)}</td><td>{p.get('reorder_level', 0)}</td><td><a href='/purchases/new' class='btn btn-success btn-small'>📦 Restock</a></td></tr>" for p in low_stock)
 
     body = f"""
     <h2>🚨 Low Stock Alerts</h2>
@@ -2548,21 +2101,17 @@ def alerts_page(request: Request):
     </div>
     <div class="card">
         <h3 style="color:#dc2626;">❌ Out of Stock ({len(out_of_stock)})</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Material</th><th>Unit</th><th>In Stock</th><th>Reorder At</th><th></th></tr>
             {out_rows if out_rows else "<tr><td colspan='5'>None. Great!</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
     <div class="card">
         <h3 style="color:#d97706;">⚠️ Running Low ({len(low_stock)})</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Material</th><th>Unit</th><th>In Stock</th><th>Reorder At</th><th></th></tr>
             {low_rows if low_rows else "<tr><td colspan='5'>None. Great!</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
     <div class="card">
         <a href="/products" class="btn">View All Materials</a>
@@ -2586,11 +2135,7 @@ def daily_summary(request: Request):
     today = datetime.now().date()
     sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
 
-    today_sales = []
-    for s in sales:
-        d = parse_dt(s.get("created_at", ""))
-        if d and d.date() == today:
-            today_sales.append(s)
+    today_sales = [s for s in sales if parse_dt(s.get("created_at", "")) and parse_dt(s.get("created_at", "")).date() == today]
 
     total_today = 0.0
     credit_today = 0.0
@@ -2623,81 +2168,55 @@ def daily_summary(request: Request):
         product_totals[name]["revenue"] += rev
 
     top_today = sorted(product_totals.items(), key=lambda x: x[1]["qty"], reverse=True)[:5]
-    top_rows = "".join(
-        f"<tr><td>{name}</td><td>{data['qty']:.0f}</td><td>GHS {data['revenue']:,.2f}</td></tr>"
-        for name, data in top_today
-    )
+    top_rows = "".join(f"<tr><td>{name}</td><td>{data['qty']:.0f}</td><td>GHS {data['revenue']:,.2f}</td></tr>" for name, data in top_today)
 
     pay_rows = ""
     for method, amount in sorted(payment_breakdown.items(), key=lambda x: -x[1]):
         pct = (amount / total_today * 100) if total_today > 0 else 0
         pay_rows += f"<tr><td>{method}</td><td>GHS {amount:,.2f}</td><td>{pct:.0f}%</td></tr>"
 
-    cashier_rows = ""
-    for c, amount in sorted(cashier_breakdown.items(), key=lambda x: -x[1]):
-        cashier_rows += f"<tr><td>{c}</td><td>GHS {amount:,.2f}</td></tr>"
+    cashier_rows = "".join(f"<tr><td>{c}</td><td>GHS {amount:,.2f}</td></tr>" for c, amount in sorted(cashier_breakdown.items(), key=lambda x: -x[1]))
 
     body = f"""
     <h2>📅 Daily Summary — {today.strftime('%A, %d %B %Y')}</h2>
-
     <div class="card" style="background:#dbeafe;border-left:6px solid #1e40af;">
         <div class="big-num">GHS {total_today:,.2f}</div>
         <div style="text-align:center;color:#666;font-size:16px;">Total Sales Today</div>
     </div>
-
     <div class="grid">
         <div class="card stat"><div class="num">{len(today_sales)}</div><div class="label">Sales Made</div></div>
         <div class="card stat"><div class="num">{len(today_items)}</div><div class="label">Items Sold</div></div>
     </div>
-
     <div class="grid">
         <div class="card stat"><div class="num" style="color:#dc2626;">GHS {credit_today:,.2f}</div><div class="label">On Credit Today</div></div>
         <div class="card stat"><div class="num" style="color:#16a34a;">GHS {total_today - credit_today:,.2f}</div><div class="label">Cash/Paid Today</div></div>
     </div>
-
     <div class="card">
         <h3>💳 Payment Breakdown</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Method</th><th>Amount</th><th>%</th></tr>
             {pay_rows if pay_rows else "<tr><td colspan='3'>No sales today yet.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
-
     <div class="card">
         <h3>🏆 Top Materials Today</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Material</th><th>Qty Sold</th><th>Revenue</th></tr>
             {top_rows if top_rows else "<tr><td colspan='3'>No materials sold today.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
-
     <div class="card">
         <h3>👤 Sales by Cashier</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Cashier</th><th>Amount</th></tr>
             {cashier_rows if cashier_rows else "<tr><td colspan='2'>No sales today yet.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
-
     <div class="card" style="text-align:center;">
         <button onclick="window.print()" class="btn btn-success">🖨️ Print Summary</button>
         <a href="/" class="btn">Dashboard</a>
         <a href="/reports" class="btn">Full Reports</a>
     </div>
-
-    <style>
-    @media print {{
-        .header, .btn, button {{ display: none !important; }}
-        body {{ background: white; }}
-        .card {{ box-shadow: none; border: 1px solid #ddd; }}
-    }}
-    </style>
     """
     return HTMLResponse(content=page("Daily Summary", body, username, info.get("role")))
 
@@ -2732,12 +2251,10 @@ def sell_page(request: Request):
     <div class="card">
         <a href="/scan" class="btn btn-success" style="margin-bottom:10px;">📷 Scan Barcode</a>
         <a href="/cart" class="btn btn-success" style="margin-bottom:10px;">🛒 View Cart & Checkout</a>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Material</th><th>Stock</th><th>Price</th><th>Add to Cart</th></tr>
             {rows if rows else "<tr><td colspan='4'>No materials.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
     """
     return HTMLResponse(content=page("Sell", body, username, role))
@@ -2808,12 +2325,10 @@ def cart_page(request: Request):
     body = f"""
     <h2>🛒 Your Cart</h2>
     <div class="card">
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Material</th><th>Qty</th><th>Price</th><th>Subtotal</th><th></th></tr>
             {rows}
-        </table>
-        </div>
+        </table></div>
         <div class="cart-total"><strong>Subtotal: GHS {total:,.2f}</strong></div>
         <br>
         <form method="post" action="/cart/checkout">
@@ -2869,14 +2384,7 @@ def cart_clear(request: Request):
 
 
 @app.post("/cart/checkout")
-async def cart_checkout(
-    request: Request,
-    customer_id: str = Form(""),
-    discount_type: str = Form("none"),
-    discount_value: float = Form(0),
-    payment_method: str = Form("Cash"),
-    amount_paid_now: float = Form(0)
-):
+async def cart_checkout(request: Request, customer_id: str = Form(""), discount_type: str = Form("none"), discount_value: float = Form(0), payment_method: str = Form("Cash"), amount_paid_now: float = Form(0)):
     username = get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=303)
@@ -2925,21 +2433,7 @@ async def cart_checkout(
     elif payment_method == "Credit" and not cust_obj:
         raise HTTPException(400, "Credit sales require a registered customer")
 
-    sale_data = {
-        "invoice_no": invoice_no,
-        "customer_id": int(customer_id) if customer_id else None,
-        "customer_name": customer_name,
-        "subtotal": subtotal,
-        "discount": discount_amount,
-        "total": final_total,
-        "payment_method": payment_method,
-        "amount_paid": final_total - credit_amount if payment_method == "Credit" else final_total,
-        "amount_paid_now": amount_paid_now if payment_method == "Credit" else final_total,
-        "amount_on_credit": credit_amount,
-        "status": "completed",
-        "user_id": username,
-        "cashier_name": username
-    }
+    sale_data = {"invoice_no": invoice_no, "customer_id": int(customer_id) if customer_id else None, "customer_name": customer_name, "subtotal": subtotal, "discount": discount_amount, "total": final_total, "payment_method": payment_method, "amount_paid": final_total - credit_amount if payment_method == "Credit" else final_total, "amount_paid_now": amount_paid_now if payment_method == "Credit" else final_total, "amount_on_credit": credit_amount, "status": "completed", "user_id": username, "cashier_name": username}
     sale_result = supabase.table("sales").insert(sale_data).execute()
     sale_id = sale_result.data[0]["id"]
 
@@ -2966,7 +2460,7 @@ async def cart_checkout(
     return response
 
 
-# ============ RECEIPT ============
+# ============ RECEIPT (WITH WHATSAPP) ============
 
 @app.get("/receipt/{sale_id}", response_class=HTMLResponse)
 def receipt(request: Request, sale_id: int):
@@ -2977,9 +2471,8 @@ def receipt(request: Request, sale_id: int):
     role = info.get("role", "cashier") if info else "cashier"
     sale = supabase.table("sales").select("*").eq("id", sale_id).single().execute().data
     items = supabase.table("sale_items").select("*").eq("sale_id", sale_id).execute().data
-    rows = ""
-    for it in items:
-        rows += f"<tr><td>{it['product_name']}</td><td>{it['quantity']}</td><td>GHS {float(it['unit_price']):,.2f}</td><td>GHS {float(it['line_total']):,.2f}</td></tr>"
+
+    rows = "".join(f"<tr><td>{it['product_name']}</td><td>{it['quantity']}</td><td>GHS {float(it['unit_price']):,.2f}</td><td>GHS {float(it['line_total']):,.2f}</td></tr>" for it in items)
 
     customer_line = ""
     if sale.get("customer_name"):
@@ -2988,6 +2481,47 @@ def receipt(request: Request, sale_id: int):
     credit_line = ""
     if float(sale.get("amount_on_credit", 0)) > 0:
         credit_line = f'<p style="text-align:right;color:#dc2626;">On Credit: GHS {float(sale.get("amount_on_credit", 0)):,.2f}</p>'
+
+    # Build plain text receipt for WhatsApp / SMS
+    text_lines = [
+        f"🏗️ {SHOP_NAME}",
+        f"{SHOP_ADDRESS}",
+        f"📞 {SHOP_PHONE}",
+        "",
+        f"Invoice: {sale['invoice_no']}",
+        f"Date: {sale['created_at'][:16]}",
+    ]
+    if sale.get("customer_name"):
+        text_lines.append(f"Customer: {sale['customer_name']}")
+    text_lines.append("")
+    text_lines.append("Items:")
+    for it in items:
+        text_lines.append(f"• {it['product_name']} — {it['quantity']} × GHS {float(it['unit_price']):,.2f} = GHS {float(it['line_total']):,.2f}")
+    text_lines.append("")
+    text_lines.append(f"Subtotal: GHS {float(sale['subtotal']):,.2f}")
+    if float(sale.get("discount", 0)) > 0:
+        text_lines.append(f"Discount: -GHS {float(sale.get('discount', 0)):,.2f}")
+    text_lines.append(f"TOTAL: GHS {float(sale['total']):,.2f}")
+    text_lines.append(f"Payment: {sale.get('payment_method', 'Cash')}")
+    if float(sale.get("amount_on_credit", 0)) > 0:
+        text_lines.append(f"On Credit: GHS {float(sale.get('amount_on_credit', 0)):,.2f}")
+    text_lines.append("")
+    text_lines.append("Thank you for your business! 🙏")
+
+    text_receipt = "\n".join(text_lines)
+    encoded_text = urllib.parse.quote(text_receipt)
+
+    # Customer phone (if registered)
+    customer_phone = ""
+    if sale.get("customer_id"):
+        try:
+            c = supabase.table("customers").select("*").eq("id", sale["customer_id"]).single().execute().data
+            if c and c.get("phone"):
+                customer_phone = str(c["phone"]).replace(" ", "").replace("+", "").replace("-", "")
+                if customer_phone.startswith("0"):
+                    customer_phone = "233" + customer_phone[1:]
+        except Exception:
+            customer_phone = ""
 
     body = f"""
     <div class="card" id="receipt">
@@ -3000,12 +2534,10 @@ def receipt(request: Request, sale_id: int):
         <p><strong>Cashier:</strong> {sale.get('cashier_name') or sale.get('user_id','')}</p>
         {customer_line}
         <hr>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr>
             {rows}
-        </table>
-        </div>
+        </table></div>
         <hr>
         <p style="text-align:right;">Subtotal: GHS {float(sale['subtotal']):,.2f}</p>
         {f'<p style="text-align:right;">Discount: -GHS {float(sale.get("discount", 0)):,.2f}</p>' if float(sale.get("discount", 0)) > 0 else ''}
@@ -3015,11 +2547,49 @@ def receipt(request: Request, sale_id: int):
         <hr>
         <p style="text-align:center;">Thank you for your business!</p>
     </div>
-    <div style="text-align:center;margin-top:15px;">
+
+    <div class="card no-print" style="text-align:center;background:#dcfce7;border:2px solid #16a34a;">
+        <h3 style="margin-top:0;color:#166534;">📤 Send Receipt to Customer</h3>
+        <p style="color:#666;font-size:14px;">Choose how to send:</p>
+        <a href="https://wa.me/{customer_phone}?text={encoded_text}" target="_blank" class="btn btn-success" style="background:#25D366;font-size:15px;padding:12px 20px;">📱 Send via WhatsApp</a>
+        <a href="sms:{customer_phone}?body={encoded_text}" class="btn" style="font-size:15px;padding:12px 20px;">📤 Send via SMS</a>
+        <button onclick="copyReceipt()" class="btn" style="font-size:15px;padding:12px 20px;background:#6b7280;">📋 Copy Receipt</button>
+        {f'<p style="margin-top:10px;color:#666;font-size:13px;">Customer phone: +{customer_phone}</p>' if customer_phone else '<p style="margin-top:10px;color:#d97706;font-size:13px;">ℹ️ Customer phone not saved — WhatsApp will ask you to pick a contact</p>'}
+    </div>
+
+    <div class="card no-print" style="text-align:center;">
         <button onclick="window.print()" class="btn btn-success">🖨️ Print Receipt</button>
         <a href="/sell" class="btn">New Sale</a>
         <a href="/" class="btn">Dashboard</a>
     </div>
+
+    <textarea id="receiptText" style="position:absolute;left:-9999px;">{text_receipt}</textarea>
+
+    <script>
+    function copyReceipt() {{
+        var textArea = document.getElementById('receiptText');
+        textArea.style.position = 'fixed';
+        textArea.style.left = '0';
+        textArea.style.top = '0';
+        textArea.select();
+        try {{
+            document.execCommand('copy');
+            alert('✅ Receipt copied! You can now paste it anywhere.');
+        }} catch (err) {{
+            alert('❌ Could not copy. Please try again.');
+        }}
+        textArea.style.position = 'absolute';
+        textArea.style.left = '-9999px';
+    }}
+    </script>
+
+    <style>
+    @media print {{
+        .header, .btn, button, .no-print {{ display: none !important; }}
+        body {{ background: white; }}
+        .card {{ box-shadow: none; }}
+    }}
+    </style>
     """
     return HTMLResponse(content=page("Receipt", body, username, role))
 
@@ -3040,15 +2610,8 @@ def categories_list(request: Request):
     for p in products:
         cid = p.get("category_id")
         counts[cid] = counts.get(cid, 0) + 1
-    rows = ""
-    for c in cats:
-        count = counts.get(c["id"], 0)
-        rows += f"""<tr>
-            <td><strong>{c['name']}</strong></td>
-            <td>{c.get('description','')}</td>
-            <td>{count} material{'s' if count != 1 else ''}</td>
-            <td><a href='/categories/delete/{c['id']}' class='btn btn-danger btn-small' onclick="return confirm('Delete {c['name']}?')">🗑️</a></td>
-        </tr>"""
+    rows = "".join(f"<tr><td><strong>{c['name']}</strong></td><td>{c.get('description','')}</td><td>{counts.get(c['id'], 0)}</td><td><a href='/categories/delete/{c['id']}' class='btn btn-danger btn-small' onclick=\"return confirm('Delete {c['name']}?')\">🗑️</a></td></tr>" for c in cats)
+
     body = f"""
     <h2>Categories</h2>
     <div class="card">
@@ -3063,12 +2626,10 @@ def categories_list(request: Request):
     </div>
     <div class="card">
         <h3>All Categories ({len(cats)})</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Category</th><th>Description</th><th>Materials</th><th></th></tr>
             {rows if rows else "<tr><td colspan='4'>No categories yet.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
     """
     return HTMLResponse(content=page("Categories", body, username, info.get("role")))
@@ -3126,24 +2687,16 @@ def users_list(request: Request):
         actions = f"<a href='/users/edit/{u['id']}' class='btn btn-warn btn-small'>✏️</a>"
         if u["username"] != username:
             actions += f" <a href='/users/delete/{u['id']}' class='btn btn-danger btn-small' onclick=\"return confirm('Delete {u['username']}?')\">🗑️</a>"
-        rows += f"""<tr>
-            <td><strong>{u['username']}</strong><br><small>{u.get('full_name','')}</small></td>
-            <td>{role_badge}</td>
-            <td>{status_badge}</td>
-            <td>{actions}</td>
-        </tr>"""
+        rows += f"<tr><td><strong>{u['username']}</strong><br><small>{u.get('full_name','')}</small></td><td>{role_badge}</td><td>{status_badge}</td><td>{actions}</td></tr>"
+
     body = f"""
     <h2>👥 Users</h2>
+    <div class="card"><a href="/users/add" class="btn btn-success">➕ Add New User</a></div>
     <div class="card">
-        <a href="/users/add" class="btn btn-success">➕ Add New User</a>
-    </div>
-    <div class="card">
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>User</th><th>Role</th><th>Status</th><th>Actions</th></tr>
             {rows}
-        </table>
-        </div>
+        </table></div>
     </div>
     """
     return HTMLResponse(content=page("Users", body, username, info.get("role")))
@@ -3322,7 +2875,6 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
 
     period_total = sum(float(s.get("total", 0)) for s in period_sales)
     period_credit = sum(float(s.get("amount_on_credit", 0)) for s in period_sales)
-
     period_revenue = sum(float(it.get("line_total", 0)) for it in period_items)
     period_cost = sum(float(it.get("cost_price", 0)) * float(it.get("quantity", 0)) for it in period_items)
     period_gross_profit = period_revenue - period_cost
@@ -3342,10 +2894,7 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
         product_stats[name]["profit"] += profit
 
     top = sorted(product_stats.items(), key=lambda x: x[1]["qty"], reverse=True)[:10]
-    top_rows = "".join(
-        f"<tr><td>{name}</td><td>{data['qty']:.0f}</td><td>GHS {data['revenue']:,.2f}</td><td>GHS {data['profit']:,.2f}</td></tr>"
-        for name, data in top
-    )
+    top_rows = "".join(f"<tr><td>{name}</td><td>{data['qty']:.0f}</td><td>GHS {data['revenue']:,.2f}</td><td>GHS {data['profit']:,.2f}</td></tr>" for name, data in top)
 
     recent_rows = ""
     for s in period_sales[:20]:
@@ -3354,7 +2903,6 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
 
     body = f"""
     <h2>Reports</h2>
-
     <div class="card date-bar">
         <h3 style="margin-top:0;">📅 Select Period</h3>
         <form method="get" action="/reports">
@@ -3371,7 +2919,6 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
             <a href="/reports?preset=all" class="btn btn-quick">All Time</a>
         </div>
     </div>
-
     <div class="card">
         <span class="period-badge">📅 Period: {period_label}</span>
         <h3>📥 Export to Excel</h3>
@@ -3381,7 +2928,6 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
         <a href="/export/customers" class="btn btn-success">📥 Customers</a>
         <a href="/export/purchases" class="btn btn-success">📥 Purchases</a>
     </div>
-
     <div class="grid">
         <div class="card stat"><div class="num">{len(period_sales)}</div><div class="label">Sales in Period</div></div>
         <div class="card stat"><div class="num">GHS {period_total:,.2f}</div><div class="label">Total Revenue</div></div>
@@ -3394,35 +2940,27 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
         <div class="card stat"><div class="num" style="color:#16a34a;">GHS {period_gross_profit:,.2f}</div><div class="label">Gross Profit</div></div>
         <div class="card stat"><div class="num" style="color:{'#16a34a' if period_net_profit >= 0 else '#dc2626'};">GHS {period_net_profit:,.2f}</div><div class="label">Net Profit</div></div>
     </div>
-
     <div class="card {'profit-box' if period_net_profit >= 0 else 'loss-box'}">
         <h3 style="margin:0;">{'💰' if period_net_profit >= 0 else '⚠️'} {'Net Profit' if period_net_profit >= 0 else 'Net Loss'} for Period</h3>
         <div class="big-num" style="color:{'#16a34a' if period_net_profit >= 0 else '#dc2626'};">GHS {period_net_profit:,.2f}</div>
         <p style="text-align:center;color:#666;">Revenue − Cost of Goods − Expenses</p>
     </div>
-
     <div class="card" style="text-align:center;">
         <a href="/pnl?start={start}&end={end}" class="btn btn-success" style="font-size:16px;padding:14px 24px;">📊 View Full Profit & Loss Statement</a>
     </div>
-
     <div class="card">
         <h3>🏆 Top Selling Materials in Period</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Material</th><th>Qty Sold</th><th>Revenue</th><th>Profit</th></tr>
             {top_rows if top_rows else "<tr><td colspan='4'>No sales in this period.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
-
     <div class="card">
         <h3>🧾 Sales in Period ({len(period_sales)})</h3>
-        <div class="table-wrap">
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Date</th><th>Invoice</th><th>Customer</th><th>Total</th><th>Cashier</th><th></th></tr>
             {recent_rows if recent_rows else "<tr><td colspan='6'>No sales in this period.</td></tr>"}
-        </table>
-        </div>
+        </table></div>
     </div>
     """
     return HTMLResponse(content=page("Reports", body, username, info.get("role")))
@@ -3448,7 +2986,6 @@ def export_sales(request: Request, start: str = "", end: str = ""):
         raise HTTPException(403, "Only admins can export data")
 
     all_sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
-
     if start and end:
         sales = [s for s in all_sales if start <= str(s.get("created_at", ""))[:10] <= end]
         fname_period = f"{start}_to_{end}"
@@ -3462,18 +2999,8 @@ def export_sales(request: Request, start: str = "", end: str = ""):
     headers = ["Date", "Invoice", "Customer", "Subtotal", "Discount", "Total", "Paid", "On Credit", "Payment", "Cashier"]
     style_header(ws, headers)
     for s in sales:
-        ws.append([
-            s.get("created_at", "")[:19].replace("T", " "),
-            s.get("invoice_no", ""),
-            s.get("customer_name") or "Walk-in",
-            float(s.get("subtotal", 0)),
-            float(s.get("discount", 0)),
-            float(s.get("total", 0)),
-            float(s.get("amount_paid_now", s.get("total", 0))),
-            float(s.get("amount_on_credit", 0)),
-            s.get("payment_method", ""),
-            s.get("cashier_name") or s.get("user_id", ""),
-        ])
+        ws.append([s.get("created_at", "")[:19].replace("T", " "), s.get("invoice_no", ""), s.get("customer_name") or "Walk-in", float(s.get("subtotal", 0)), float(s.get("discount", 0)), float(s.get("total", 0)), float(s.get("amount_paid_now", s.get("total", 0))), float(s.get("amount_on_credit", 0)), s.get("payment_method", ""), s.get("cashier_name") or s.get("user_id", "")])
+
     widths = [20, 22, 20, 12, 12, 12, 12, 12, 15, 15]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w
@@ -3502,16 +3029,7 @@ def export_products(request: Request):
     headers = ["Name", "SKU", "Unit", "Stock", "Cost Price", "Selling Price", "Reorder Level", "Location"]
     style_header(ws, headers)
     for p in products:
-        ws.append([
-            p.get("name", ""),
-            p.get("sku", ""),
-            p.get("unit", ""),
-            float(p.get("quantity_in_stock", 0)),
-            float(p.get("cost_price", 0)),
-            float(p.get("selling_price", 0)),
-            float(p.get("reorder_level", 0)),
-            p.get("location") or "",
-        ])
+        ws.append([p.get("name", ""), p.get("sku", ""), p.get("unit", ""), float(p.get("quantity_in_stock", 0)), float(p.get("cost_price", 0)), float(p.get("selling_price", 0)), float(p.get("reorder_level", 0)), p.get("location") or ""])
     widths = [30, 15, 10, 10, 12, 14, 14, 15]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w
@@ -3540,12 +3058,7 @@ def export_stock(request: Request):
     headers = ["Date", "Type", "Quantity", "Note"]
     style_header(ws, headers)
     for m in movements:
-        ws.append([
-            m.get("created_at", "")[:19].replace("T", " "),
-            m.get("movement_type", ""),
-            float(m.get("quantity", 0)),
-            m.get("note", ""),
-        ])
+        ws.append([m.get("created_at", "")[:19].replace("T", " "), m.get("movement_type", ""), float(m.get("quantity", 0)), m.get("note", "")])
     widths = [20, 12, 12, 50]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w
@@ -3574,13 +3087,7 @@ def export_customers(request: Request):
     headers = ["Name", "Phone", "Address", "Balance Owed", "Notes"]
     style_header(ws, headers)
     for c in customers:
-        ws.append([
-            c.get("name", ""),
-            c.get("phone", "") or "",
-            c.get("address", "") or "",
-            float(c.get("balance", 0)),
-            c.get("notes", "") or "",
-        ])
+        ws.append([c.get("name", ""), c.get("phone", "") or "", c.get("address", "") or "", float(c.get("balance", 0)), c.get("notes", "") or ""])
     widths = [25, 15, 25, 15, 30]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w
@@ -3609,15 +3116,7 @@ def export_purchases(request: Request):
     headers = ["Date", "PO Number", "Supplier", "Total", "Paid", "Owed", "Payment Method"]
     style_header(ws, headers)
     for po in purchases:
-        ws.append([
-            po.get("created_at", "")[:19].replace("T", " "),
-            po.get("po_number", ""),
-            po.get("supplier_name", ""),
-            float(po.get("total", 0)),
-            float(po.get("amount_paid", 0)),
-            float(po.get("amount_owed", 0)),
-            po.get("payment_method", ""),
-        ])
+        ws.append([po.get("created_at", "")[:19].replace("T", " "), po.get("po_number", ""), po.get("supplier_name", ""), float(po.get("total", 0)), float(po.get("amount_paid", 0)), float(po.get("amount_owed", 0)), po.get("payment_method", "")])
     widths = [20, 22, 25, 12, 12, 12, 18]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w
