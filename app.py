@@ -40,6 +40,7 @@ def page(title, body, user=None, role=None):
                 "<a href='/sell'>New Sale</a>"
                 "<a href='/cart'>Cart</a>"
                 "<a href='/expenses'>💰 Expenses</a>"
+                "<a href='/margins'>📈 Margins</a>"
                 "<a href='/alerts'>🚨 Alerts</a>"
                 "<a href='/summary'>📅 Daily</a>"
                 "<a href='/reports'>Reports</a>"
@@ -101,6 +102,9 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .ok {{ color: #16a34a; font-weight: bold; }}
 .owed {{ color: #dc2626; font-weight: bold; font-size: 16px; }}
 .clear {{ color: #16a34a; font-weight: bold; }}
+.good-margin {{ color: #16a34a; font-weight: bold; }}
+.ok-margin {{ color: #d97706; font-weight: bold; }}
+.bad-margin {{ color: #dc2626; font-weight: bold; }}
 .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
 .stat {{ text-align: center; padding: 15px; }}
 .stat .num {{ font-size: 28px; font-weight: bold; color: #1e40af; }}
@@ -113,12 +117,6 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 .loss-box {{ background: #fee2e2; border-left: 6px solid #dc2626; }}
 .success-msg {{ background: #dcfce7; border: 2px solid #16a34a; color: #166534; padding: 15px; border-radius: 8px; margin-bottom: 15px; }}
 .error-msg {{ background: #fee2e2; border: 2px solid #dc2626; color: #991b1b; padding: 15px; border-radius: 8px; margin-bottom: 15px; }}
-.date-bar {{ background: #dbeafe; border: 2px solid #1e40af; padding: 15px; border-radius: 8px; }}
-.date-bar form {{ display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }}
-.date-bar .field {{ flex: 1; min-width: 150px; }}
-.date-bar input {{ margin: 4px 0 0 0; }}
-.quick-links {{ margin-top: 10px; }}
-.period-badge {{ display: inline-block; background: #1e40af; color: white; padding: 6px 14px; border-radius: 20px; font-size: 14px; font-weight: bold; margin-bottom: 10px; }}
 @media (max-width: 768px) {{
     .menu-toggle {{ display: block; }}
     .menu-links {{ display: none; flex-direction: column; align-items: stretch; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25); }}
@@ -135,8 +133,6 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
     button, .btn {{ width: 100%; text-align: center; margin: 5px 0; }}
     .btn-small {{ width: auto; }}
     .big-num {{ font-size: 32px; }}
-    .date-bar form {{ flex-direction: column; }}
-    .date-bar .field {{ width: 100%; }}
 }}
 </style>
 </head>
@@ -159,7 +155,6 @@ button:hover, .btn:hover {{ background: #1e3a8a; }}
 # ============ HELPERS ============
 
 def parse_dt(s):
-    """Safely parse a datetime string."""
     try:
         return datetime.fromisoformat(str(s).replace("Z", "+00:00")).replace(tzinfo=None)
     except Exception:
@@ -521,6 +516,254 @@ def delete_product(request: Request, product_id: int):
     return RedirectResponse("/products", status_code=303)
 
 
+# ============ PROFIT MARGINS ============
+
+@app.get("/margins", response_class=HTMLResponse)
+def margins_page(request: Request, filter_type: str = "all", sort_by: str = "margin"):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can view profit margins")
+
+    products = supabase.table("products").select("*").eq("is_active", True).execute().data
+    all_items = supabase.table("sale_items").select("*").execute().data
+
+    # qty sold per product
+    sold_stats = {}
+    for it in all_items:
+        pid = it.get("product_id")
+        if pid is None:
+            continue
+        qty = float(it.get("quantity", 0))
+        rev = float(it.get("line_total", 0))
+        cost = float(it.get("cost_price", 0)) * qty
+        if pid not in sold_stats:
+            sold_stats[pid] = {"qty": 0, "revenue": 0, "cost": 0}
+        sold_stats[pid]["qty"] += qty
+        sold_stats[pid]["revenue"] += rev
+        sold_stats[pid]["cost"] += cost
+
+    rows_data = []
+    for p in products:
+        cost = float(p.get("cost_price", 0))
+        sell = float(p.get("selling_price", 0))
+        profit_per_unit = sell - cost
+        margin_pct = (profit_per_unit / sell * 100) if sell > 0 else 0
+
+        stat = sold_stats.get(p["id"], {"qty": 0, "revenue": 0, "cost": 0})
+        qty_sold = stat["qty"]
+        total_profit = stat["revenue"] - stat["cost"]
+
+        rows_data.append({
+            "id": p["id"],
+            "name": p["name"],
+            "sku": p.get("sku", ""),
+            "unit": p.get("unit", ""),
+            "cost": cost,
+            "sell": sell,
+            "profit_per_unit": profit_per_unit,
+            "margin_pct": margin_pct,
+            "qty_sold": qty_sold,
+            "revenue": stat["revenue"],
+            "total_profit": total_profit,
+        })
+
+    # filter
+    if filter_type == "profit":
+        rows_data = [r for r in rows_data if r["profit_per_unit"] > 0]
+    elif filter_type == "loss":
+        rows_data = [r for r in rows_data if r["profit_per_unit"] <= 0]
+    elif filter_type == "lowmargin":
+        rows_data = [r for r in rows_data if 0 < r["margin_pct"] < 10]
+    elif filter_type == "highmargin":
+        rows_data = [r for r in rows_data if r["margin_pct"] >= 30]
+
+    # sort
+    if sort_by == "margin":
+        rows_data.sort(key=lambda x: x["margin_pct"], reverse=True)
+    elif sort_by == "profit":
+        rows_data.sort(key=lambda x: x["total_profit"], reverse=True)
+    elif sort_by == "qty":
+        rows_data.sort(key=lambda x: x["qty_sold"], reverse=True)
+    elif sort_by == "name":
+        rows_data.sort(key=lambda x: x["name"].lower())
+
+    # summary stats
+    total_materials = len(products)
+    avg_margin = (sum(r["margin_pct"] for r in rows_data) / len(rows_data)) if rows_data else 0
+    profitable_count = sum(1 for r in rows_data if r["profit_per_unit"] > 0)
+    loss_count = sum(1 for r in rows_data if r["profit_per_unit"] <= 0)
+
+    # best and worst
+    best = max(rows_data, key=lambda x: x["margin_pct"], default=None)
+    worst = min(rows_data, key=lambda x: x["margin_pct"], default=None)
+
+    rows = ""
+    for r in rows_data:
+        if r["margin_pct"] >= 30:
+            margin_class = "good-margin"
+        elif r["margin_pct"] >= 10:
+            margin_class = "ok-margin"
+        else:
+            margin_class = "bad-margin"
+
+        rows += f"""<tr>
+            <td><strong>{r['name']}</strong><br><small>{r['sku']}</small></td>
+            <td>{r['unit']}</td>
+            <td>GHS {r['cost']:,.2f}</td>
+            <td>GHS {r['sell']:,.2f}</td>
+            <td class='{margin_class}'>GHS {r['profit_per_unit']:,.2f}</td>
+            <td class='{margin_class}'>{r['margin_pct']:.1f}%</td>
+            <td>{r['qty_sold']:.0f}</td>
+            <td>GHS {r['total_profit']:,.2f}</td>
+        </tr>"""
+
+    best_html = ""
+    if best:
+        best_html = f"<p><strong>🏆 Best Margin:</strong> {best['name']} — <span class='good-margin'>{best['margin_pct']:.1f}%</span></p>"
+    worst_html = ""
+    if worst:
+        worst_html = f"<p><strong>⚠️ Lowest Margin:</strong> {worst['name']} — <span class='bad-margin'>{worst['margin_pct']:.1f}%</span></p>"
+
+    body = f"""
+    <h2>📈 Profit Margins per Material</h2>
+
+    <div class="grid">
+        <div class="card stat"><div class="num">{total_materials}</div><div class="label">Total Materials</div></div>
+        <div class="card stat"><div class="num">{avg_margin:.1f}%</div><div class="label">Average Margin</div></div>
+    </div>
+
+    <div class="grid">
+        <div class="card stat"><div class="num" style="color:#16a34a;">{profitable_count}</div><div class="label">Profitable Items</div></div>
+        <div class="card stat"><div class="num" style="color:#dc2626;">{loss_count}</div><div class="label">Loss / No Profit</div></div>
+    </div>
+
+    <div class="card">
+        {best_html}
+        {worst_html}
+    </div>
+
+    <div class="card">
+        <h3>🎛️ Filters & Sort</h3>
+        <form method="get" action="/margins" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+            <div style="flex:1;min-width:180px;">
+                <label>Show</label>
+                <select name="filter_type">
+                    <option value="all" {'selected' if filter_type=='all' else ''}>All Materials</option>
+                    <option value="profit" {'selected' if filter_type=='profit' else ''}>Only Profitable</option>
+                    <option value="loss" {'selected' if filter_type=='loss' else ''}>Only Loss/No Profit</option>
+                    <option value="lowmargin" {'selected' if filter_type=='lowmargin' else ''}>Low Margin (below 10%)</option>
+                    <option value="highmargin" {'selected' if filter_type=='highmargin' else ''}>High Margin (30%+)</option>
+                </select>
+            </div>
+            <div style="flex:1;min-width:180px;">
+                <label>Sort By</label>
+                <select name="sort_by">
+                    <option value="margin" {'selected' if sort_by=='margin' else ''}>Margin % (high → low)</option>
+                    <option value="profit" {'selected' if sort_by=='profit' else ''}>Total Profit (high → low)</option>
+                    <option value="qty" {'selected' if sort_by=='qty' else ''}>Qty Sold (high → low)</option>
+                    <option value="name" {'selected' if sort_by=='name' else ''}>Name (A → Z)</option>
+                </select>
+            </div>
+            <button type="submit" class="btn">Apply</button>
+            <a href="/export/margins" class="btn btn-success">📥 Export Excel</a>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3>📊 Materials List ({len(rows_data)})</h3>
+        <div class="table-wrap">
+        <table>
+            <tr>
+                <th>Material</th>
+                <th>Unit</th>
+                <th>Cost</th>
+                <th>Price</th>
+                <th>Profit/Unit</th>
+                <th>Margin %</th>
+                <th>Qty Sold</th>
+                <th>Total Profit</th>
+            </tr>
+            {rows if rows else "<tr><td colspan='8'>No materials match this filter.</td></tr>"}
+        </table>
+        </div>
+        <p style="margin-top:15px;color:#666;font-size:13px;">
+            🟢 30%+ margin &nbsp;·&nbsp; 🟡 10–29% margin &nbsp;·&nbsp; 🔴 Below 10% or loss
+        </p>
+    </div>
+    """
+    return HTMLResponse(content=page("Margins", body, username, info.get("role")))
+
+
+@app.get("/export/margins")
+def export_margins(request: Request):
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can export data")
+
+    products = supabase.table("products").select("*").eq("is_active", True).execute().data
+    all_items = supabase.table("sale_items").select("*").execute().data
+
+    sold_stats = {}
+    for it in all_items:
+        pid = it.get("product_id")
+        if pid is None:
+            continue
+        qty = float(it.get("quantity", 0))
+        rev = float(it.get("line_total", 0))
+        cost = float(it.get("cost_price", 0)) * qty
+        if pid not in sold_stats:
+            sold_stats[pid] = {"qty": 0, "revenue": 0, "cost": 0}
+        sold_stats[pid]["qty"] += qty
+        sold_stats[pid]["revenue"] += rev
+        sold_stats[pid]["cost"] += cost
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Profit Margins"
+    headers = ["Material", "SKU", "Unit", "Cost", "Price", "Profit/Unit", "Margin %", "Qty Sold", "Revenue", "Total Profit"]
+    style_header(ws, headers)
+
+    for p in products:
+        cost = float(p.get("cost_price", 0))
+        sell = float(p.get("selling_price", 0))
+        profit_per_unit = sell - cost
+        margin_pct = (profit_per_unit / sell * 100) if sell > 0 else 0
+        stat = sold_stats.get(p["id"], {"qty": 0, "revenue": 0, "cost": 0})
+        total_profit = stat["revenue"] - stat["cost"]
+
+        ws.append([
+            p.get("name", ""),
+            p.get("sku", ""),
+            p.get("unit", ""),
+            cost,
+            sell,
+            profit_per_unit,
+            round(margin_pct, 1),
+            stat["qty"],
+            stat["revenue"],
+            total_profit,
+        ])
+
+    widths = [30, 15, 10, 12, 12, 14, 12, 12, 14, 14]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=OBOLO_margins_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"}
+    )
+
+
 # ============ CUSTOMERS ============
 
 @app.get("/customers", response_class=HTMLResponse)
@@ -714,7 +957,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
             "ref": s.get("invoice_no", ""),
             "debit": float(s.get("total", 0)),
             "credit": float(s.get("amount_paid_now", 0)) if float(s.get("amount_on_credit", 0)) > 0 else 0,
-            "note": "Purchase"
         })
     for p in period_payments:
         transactions.append({
@@ -723,7 +965,6 @@ def customer_statement(request: Request, customer_id: int, start: str = "", end:
             "ref": p.get("payment_method", ""),
             "debit": 0,
             "credit": float(p.get("amount", 0)),
-            "note": p.get("note", "") or "Payment received"
         })
 
     transactions.sort(key=lambda x: x["date"])
@@ -2360,7 +2601,6 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
     now = datetime.now()
     today_str = now.strftime("%Y-%m-%d")
 
-    # Handle quick presets
     if preset == "today":
         start = today_str
         end = today_str
@@ -2395,31 +2635,24 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
         d = str(date_str)[:10]
         return start <= d <= end
 
-    # Load data
     all_sales = supabase.table("sales").select("*").order("created_at", desc=True).execute().data
     all_items = supabase.table("sale_items").select("*").execute().data
     all_expenses = supabase.table("expenses").select("*").execute().data
 
     period_sales = [s for s in all_sales if in_range(s.get("created_at", ""))]
-
     sale_ids = [s["id"] for s in period_sales]
     period_items = [it for it in all_items if it.get("sale_id") in sale_ids]
-
-    # expenses: use expense_date field
     period_expenses_list = [e for e in all_expenses if start <= str(e.get("expense_date", ""))[:10] <= end]
     period_expenses = sum(float(e.get("amount", 0)) for e in period_expenses_list)
 
-    # totals
     period_total = sum(float(s.get("total", 0)) for s in period_sales)
     period_credit = sum(float(s.get("amount_on_credit", 0)) for s in period_sales)
 
-    # revenue and profit from sale_items
     period_revenue = sum(float(it.get("line_total", 0)) for it in period_items)
     period_cost = sum(float(it.get("cost_price", 0)) * float(it.get("quantity", 0)) for it in period_items)
     period_gross_profit = period_revenue - period_cost
     period_net_profit = period_gross_profit - period_expenses
 
-    # top materials in period
     product_stats = {}
     for it in period_items:
         name = it.get("product_name", "Unknown")
@@ -2471,8 +2704,8 @@ def reports(request: Request, start: str = "", end: str = "", preset: str = ""):
     </div>
 
     <div class="card">
-        <span class="period-badge">📅 Period: {period_label}</span>
-        <h3 style="margin-top:10px;">📥 Export to Excel</h3>
+        <span class="period-badge" style="display:inline-block;background:#1e40af;color:white;padding:6px 14px;border-radius:20px;font-size:14px;font-weight:bold;margin-bottom:10px;">📅 Period: {period_label}</span>
+        <h3>📥 Export to Excel</h3>
         <a href="/export/sales?start={start}&end={end}" class="btn btn-success">📥 Sales for this period</a>
         <a href="/export/products" class="btn btn-success">📥 All Materials</a>
         <a href="/export/stock" class="btn btn-success">📥 Stock Movements</a>
