@@ -187,4 +187,65 @@ def scan_page(request: Request, code: str = ""):
     }});
     </script>
     """
-    return page("Scan", body, username, role)
+    return page("Scan", body, username, role)  
+
+@router.get("/barcodes", response_class=HTMLResponse)
+def barcodes_page(request: Request):
+    from app import page
+
+    username = get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    info = get_user_info(username)
+    if not info or info.get("role") != "admin":
+        raise HTTPException(403, "Only admins can print barcodes")
+
+    products = supabase.table("products").select("*").eq("is_active", True).order("name").execute().data
+
+    labels = ""
+    for p in products:
+        code = p.get("barcode") or p.get("sku") or f"P{p['id']}"
+        price = float(p.get("selling_price", 0))
+        labels += f"""
+        <div class="barcode-label">
+            <div class="name">{p['name']}</div>
+            <div class="price">GHS {price:,.2f} / {p.get('unit','')}</div>
+            <svg class="barcode-svg" data-code="{code}"></svg>
+            <div style="font-size:11px;margin-top:3px;">{code}</div>
+        </div>
+        """
+
+    body = f"""
+    <h2>🏷️ Barcode Labels</h2>
+
+    <div class="card no-print">
+        <p><strong>{len(products)}</strong> materials. Each will get a barcode label using its SKU (or barcode if set).</p>
+        <button onclick="window.print()" class="btn btn-success">🖨️ Print All Labels</button>
+        <a href="/products" class="btn">← Back to Materials</a>
+    </div>
+
+    <div class="card">
+        {labels if labels else "<p>No materials to print labels for.</p>"}
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+    <script>
+    window.addEventListener('load', function() {{
+        document.querySelectorAll('.barcode-svg').forEach(function(svg) {{
+            var code = svg.getAttribute('data-code');
+            try {{
+                JsBarcode(svg, code, {{
+                    format: 'CODE128',
+                    width: 1.5,
+                    height: 50,
+                    displayValue: false,
+                    margin: 0
+                }});
+            }} catch (e) {{
+                svg.outerHTML = '<div style="font-size:11px;color:#dc2626;">Barcode error: ' + code + '</div>';
+            }}
+        }});
+    }});
+    </script>
+    """
+    return page("Barcodes", body, username, info.get("role"))
